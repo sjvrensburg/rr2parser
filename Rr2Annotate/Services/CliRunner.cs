@@ -42,9 +42,12 @@ public static class CliRunner
         };
     }
 
-    public static async Task<AnnotationExport> ExtractAnnotationsAsync(string cliCommand, string pdfPath)
+    public static async Task<AnnotationExport> ExtractAnnotationsAsync(
+        string cliCommand, string pdfPath, string? cliPageRange = null)
     {
         var args = $"annotations \"{pdfPath}\" --include-text --include-blocks --format json";
+        if (cliPageRange != null)
+            args += $" --pages \"{cliPageRange}\"";
         var (json, _) = await RunAsync(cliCommand, args);
         return JsonSerializer.Deserialize<AnnotationExport>(json, JsonOptions)
             ?? throw new InvalidOperationException("Failed to deserialize annotation export.");

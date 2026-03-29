@@ -1,9 +1,10 @@
 using System.Text;
+using System.Text.RegularExpressions;
 using Rr2Annotate.Models;
 
 namespace Rr2Annotate.Services;
 
-public class MarkdownBuilder
+public partial class MarkdownBuilder
 {
     private readonly AnnotationExport _export;
     private readonly Dictionary<(int page, int annotIdx), string>? _images;
@@ -25,12 +26,11 @@ public class MarkdownBuilder
         sb.AppendLine($"# Annotations: {_export.Source}");
         sb.AppendLine();
 
-        // Build heading hierarchy lookup: maps (title, page) to depth and outline entry
-        var headingDepths = new Dictionary<string, int>();
+        // Build heading hierarchy lookup
         var headingOrder = new List<(string key, string title, int depth)>();
-        BuildHeadingIndex(_export.Outline, 0, headingDepths, headingOrder);
+        BuildHeadingIndex(_export.Outline, 0, headingOrder);
 
-        // Collect all annotations with their page and index, keyed by heading
+        // Collect all annotations keyed by heading
         var grouped = new Dictionary<string, List<(int page, int annotIdx, Annotation annotation)>>();
 
         foreach (var page in _export.Pages)
@@ -49,76 +49,131 @@ public class MarkdownBuilder
             }
         }
 
-        // Emit in outline order
-        foreach (var (key, title, depth) in headingOrder)
+        // Sort each group by reading order
+        foreach (var annotations in grouped.Values)
         {
-            if (!grouped.TryGetValue(key, out var annotations))
-                continue;
-
-            // Sort by page then y-position (reading order)
             annotations.Sort((a, b) =>
             {
                 var pageCmp = a.page.CompareTo(b.page);
                 return pageCmp != 0 ? pageCmp : a.annotation.SortY.CompareTo(b.annotation.SortY);
             });
+        }
 
-            // Heading level: depth 0 = ##, depth 1 = ###, etc., capped at ####
+        // Emit summary header
+        EmitSummary(sb, headingOrder, grouped);
+
+        // Emit annotations per heading in outline order
+        foreach (var (key, title, depth) in headingOrder)
+        {
+            if (!grouped.TryGetValue(key, out var annotations))
+                continue;
+
             var level = Math.Min(depth + 2, 4);
             sb.AppendLine($"{new string('#', level)} {title}");
             sb.AppendLine();
 
-            foreach (var (page, annotIdx, annotation) in annotations)
-            {
-                EmitAnnotation(sb, page, annotIdx, annotation);
-            }
+            EmitAnnotationGroup(sb, annotations);
         }
 
-        // Handle annotations without a matching heading
+        // Annotations without a matching heading
         if (grouped.TryGetValue("__no_heading__", out var ungrouped))
         {
             sb.AppendLine("## Other Annotations");
             sb.AppendLine();
-            ungrouped.Sort((a, b) =>
-            {
-                var pageCmp = a.page.CompareTo(b.page);
-                return pageCmp != 0 ? pageCmp : a.annotation.SortY.CompareTo(b.annotation.SortY);
-            });
-            foreach (var (page, annotIdx, annotation) in ungrouped)
-            {
-                EmitAnnotation(sb, page, annotIdx, annotation);
-            }
+            EmitAnnotationGroup(sb, ungrouped);
         }
 
         return sb.ToString();
     }
 
-    private void EmitAnnotation(StringBuilder sb, int page, int annotIdx, Annotation annotation)
+    private void EmitSummary(
+        StringBuilder sb,
+        List<(string key, string title, int depth)> headingOrder,
+        Dictionary<string, List<(int page, int annotIdx, Annotation annotation)>> grouped)
+    {
+        sb.AppendLine("## Summary");
+        sb.AppendLine();
+
+        var totalAnnotations = grouped.Values.Sum(g => g.Count);
+        var totalPages = grouped.Values.SelectMany(g => g).Select(a => a.page).Distinct().Count();
+        sb.AppendLine($"**{totalAnnotations} annotations** across **{totalPages} pages**");
+        sb.AppendLine();
+
+        sb.AppendLine("| Section | Highlights | Notes | Rectangles | Freehand |");
+        sb.AppendLine("|---------|-----------|-------|------------|----------|");
+
+        foreach (var (key, title, _) in headingOrder)
+        {
+            if (!grouped.TryGetValue(key, out var annotations))
+                continue;
+
+            var highlights = annotations.Count(a => a.annotation is HighlightAnnotation);
+            var notes = annotations.Count(a => a.annotation is TextNoteAnnotation);
+            var rects = annotations.Count(a => a.annotation is RectAnnotation);
+            var freehand = annotations.Count(a => a.annotation is FreehandAnnotation);
+
+            sb.AppendLine($"| {title} | {highlights} | {notes} | {rects} | {freehand} |");
+        }
+
+        if (grouped.ContainsKey("__no_heading__"))
+        {
+            var ug = grouped["__no_heading__"];
+            sb.AppendLine($"| *(Other)* | {ug.Count(a => a.annotation is HighlightAnnotation)} | {ug.Count(a => a.annotation is TextNoteAnnotation)} | {ug.Count(a => a.annotation is RectAnnotation)} | {ug.Count(a => a.annotation is FreehandAnnotation)} |");
+        }
+
+        sb.AppendLine();
+    }
+
+    /// <summary>
+    /// Emits a group of annotations, deduplicating block text when consecutive
+    /// annotations share the same overlapping blocks.
+    /// </summary>
+    private void EmitAnnotationGroup(
+        StringBuilder sb,
+        List<(int page, int annotIdx, Annotation annotation)> annotations)
+    {
+        string? lastBlockTextKey = null;
+
+        foreach (var (page, annotIdx, annotation) in annotations)
+        {
+            var blockText = GetBlockText(annotation.OverlappingBlocks);
+            var blockTextKey = string.IsNullOrWhiteSpace(blockText) ? null : blockText;
+
+            // If this annotation shares the same block text as the previous one,
+            // pass suppressContext=true to avoid repeating the block text.
+            bool suppressContext = blockTextKey != null && blockTextKey == lastBlockTextKey;
+
+            EmitAnnotation(sb, page, annotIdx, annotation, suppressContext);
+            lastBlockTextKey = blockTextKey;
+        }
+    }
+
+    private void EmitAnnotation(StringBuilder sb, int page, int annotIdx, Annotation annotation, bool suppressContext)
     {
         switch (annotation)
         {
             case HighlightAnnotation highlight:
-                EmitHighlight(sb, page, highlight);
+                EmitHighlight(sb, page, highlight, suppressContext);
                 break;
             case TextNoteAnnotation note:
-                EmitTextNote(sb, page, note);
+                EmitTextNote(sb, page, note, suppressContext);
                 break;
             case RectAnnotation rect:
-                EmitRect(sb, page, annotIdx, rect);
+                EmitRect(sb, page, annotIdx, rect, suppressContext);
                 break;
             case FreehandAnnotation freehand:
-                EmitFreehand(sb, page, annotIdx, freehand);
+                EmitFreehand(sb, page, annotIdx, freehand, suppressContext);
                 break;
         }
     }
 
-    private void EmitHighlight(StringBuilder sb, int page, HighlightAnnotation highlight)
+    private void EmitHighlight(StringBuilder sb, int page, HighlightAnnotation highlight, bool suppressContext)
     {
-        var blockText = GetBlockText(highlight.OverlappingBlocks);
-        var highlightedText = NormalizeText(highlight.Text ?? "");
+        var blockText = suppressContext ? null : GetBlockText(highlight.OverlappingBlocks);
+        var highlightedText = CleanText(highlight.Text ?? "");
 
         if (!string.IsNullOrWhiteSpace(blockText) && !string.IsNullOrWhiteSpace(highlightedText))
         {
-            // Bold the highlighted portion within the block text
             var bolded = BoldHighlightInContext(blockText, highlightedText);
             sb.AppendLine($"> {bolded}");
         }
@@ -136,14 +191,16 @@ public class MarkdownBuilder
         sb.AppendLine();
     }
 
-    private void EmitTextNote(StringBuilder sb, int page, TextNoteAnnotation note)
+    private void EmitTextNote(StringBuilder sb, int page, TextNoteAnnotation note, bool suppressContext)
     {
-        var blockText = GetBlockText(note.OverlappingBlocks);
-
-        if (!string.IsNullOrWhiteSpace(blockText))
+        if (!suppressContext)
         {
-            sb.AppendLine($"> {blockText}");
-            sb.AppendLine(">");
+            var blockText = GetBlockText(note.OverlappingBlocks);
+            if (!string.IsNullOrWhiteSpace(blockText))
+            {
+                sb.AppendLine($"> {blockText}");
+                sb.AppendLine(">");
+            }
         }
 
         sb.AppendLine($"> **Note:** {note.NoteText}");
@@ -152,11 +209,9 @@ public class MarkdownBuilder
         sb.AppendLine();
     }
 
-    private void EmitRect(StringBuilder sb, int page, int annotIdx, RectAnnotation rect)
+    private void EmitRect(StringBuilder sb, int page, int annotIdx, RectAnnotation rect, bool suppressContext)
     {
         var hasImage = TryGetImagePath(page, annotIdx, out var imagePath);
-        var blockText = GetBlockText(rect.OverlappingBlocks);
-        var rectText = NormalizeText(rect.Text ?? "");
 
         if (hasImage)
         {
@@ -164,13 +219,19 @@ public class MarkdownBuilder
             sb.AppendLine();
         }
 
-        if (!string.IsNullOrWhiteSpace(blockText))
+        if (!suppressContext)
         {
-            sb.AppendLine($"> {blockText}");
-        }
-        else if (!string.IsNullOrWhiteSpace(rectText))
-        {
-            sb.AppendLine($"> {rectText}");
+            var blockText = GetBlockText(rect.OverlappingBlocks);
+            var rectText = CleanText(rect.Text ?? "");
+
+            if (!string.IsNullOrWhiteSpace(blockText))
+            {
+                sb.AppendLine($"> {blockText}");
+            }
+            else if (!string.IsNullOrWhiteSpace(rectText))
+            {
+                sb.AppendLine($"> {rectText}");
+            }
         }
 
         sb.AppendLine($">");
@@ -178,10 +239,9 @@ public class MarkdownBuilder
         sb.AppendLine();
     }
 
-    private void EmitFreehand(StringBuilder sb, int page, int annotIdx, FreehandAnnotation freehand)
+    private void EmitFreehand(StringBuilder sb, int page, int annotIdx, FreehandAnnotation freehand, bool suppressContext)
     {
         var hasImage = TryGetImagePath(page, annotIdx, out var imagePath);
-        var blockText = GetBlockText(freehand.OverlappingBlocks);
 
         if (hasImage)
         {
@@ -189,10 +249,14 @@ public class MarkdownBuilder
             sb.AppendLine();
         }
 
-        if (!string.IsNullOrWhiteSpace(blockText))
+        if (!suppressContext)
         {
-            sb.AppendLine($"> {blockText}");
-            sb.AppendLine($">");
+            var blockText = GetBlockText(freehand.OverlappingBlocks);
+            if (!string.IsNullOrWhiteSpace(blockText))
+            {
+                sb.AppendLine($"> {blockText}");
+                sb.AppendLine($">");
+            }
         }
 
         if (!hasImage)
@@ -222,25 +286,44 @@ public class MarkdownBuilder
     {
         if (blocks.Count == 0) return "";
 
-        // Concatenate text from all overlapping blocks in reading order
         var ordered = blocks
             .Where(b => !string.IsNullOrWhiteSpace(b.Text))
             .OrderBy(b => b.ReadingOrder ?? 0);
 
-        var combined = string.Join("\n\n", ordered.Select(b => NormalizeText(b.Text!)));
+        var combined = string.Join("\n\n", ordered.Select(b => CleanText(b.Text!)));
         return combined;
     }
 
-    private static string NormalizeText(string text)
+    /// <summary>
+    /// Cleans extracted PDF text: removes control characters, soft hyphens,
+    /// normalises whitespace, and trims.
+    /// </summary>
+    internal static string CleanText(string text)
     {
-        // Replace \r\n and \r with spaces, collapse multiple spaces
-        return text
-            .Replace("\r\n", " ")
-            .Replace("\r", " ")
-            .Replace("\n", " ")
-            .Replace("  ", " ")
-            .Trim();
+        // Remove soft hyphens (U+00AD) and other zero-width/control chars
+        // but keep standard whitespace
+        var cleaned = new StringBuilder(text.Length);
+        foreach (var c in text)
+        {
+            if (c == '\u00AD') continue;                             // soft hyphen
+            if (c == '\u0002' || c == '\u0003') continue;            // STX/ETX (PDF artifacts)
+            if (char.IsControl(c) && c != '\n' && c != '\r' && c != '\t')
+                continue;
+            cleaned.Append(c);
+        }
+
+        // Normalise all whitespace (line breaks, tabs) to single spaces
+        return MultipleSpacesRegex().Replace(
+            cleaned.ToString()
+                .Replace("\r\n", " ")
+                .Replace("\r", " ")
+                .Replace("\n", " ")
+                .Replace("\t", " "),
+            " ").Trim();
     }
+
+    [GeneratedRegex(@"\s{2,}")]
+    private static partial Regex MultipleSpacesRegex();
 
     private static string BoldHighlightInContext(string blockText, string highlightText)
     {
@@ -253,15 +336,13 @@ public class MarkdownBuilder
                 + blockText[(idx + highlightText.Length)..];
         }
 
-        // Fuzzy match: collapse all whitespace to single spaces in both strings,
-        // then find where the highlight sits in the block text
+        // Fuzzy match: collapse whitespace in both strings
         var normBlock = CollapseWhitespace(blockText);
         var normHighlight = CollapseWhitespace(highlightText);
 
         var normIdx = normBlock.IndexOf(normHighlight, StringComparison.OrdinalIgnoreCase);
         if (normIdx >= 0)
         {
-            // Map normalized indices back to the original block text
             var origStart = MapNormalizedIndex(blockText, normIdx);
             var origEnd = MapNormalizedIndex(blockText, normIdx + normHighlight.Length);
 
@@ -270,7 +351,7 @@ public class MarkdownBuilder
                 + blockText[origEnd..];
         }
 
-        // Last resort: show highlighted text separately
+        // Last resort
         return $"{blockText}\n>\n> **Highlighted:** {highlightText}";
     }
 
@@ -294,14 +375,10 @@ public class MarkdownBuilder
         return sb.ToString().Trim();
     }
 
-    /// <summary>
-    /// Maps an index in the collapsed-whitespace version back to the original string.
-    /// </summary>
     private static int MapNormalizedIndex(string original, int normalizedIndex)
     {
         int ni = 0;
         bool lastWasSpace = false;
-        // Skip leading whitespace (trimmed in normalized)
         int oi = 0;
         while (oi < original.Length && char.IsWhiteSpace(original[oi])) oi++;
 
@@ -326,15 +403,13 @@ public class MarkdownBuilder
 
     private static void BuildHeadingIndex(
         List<OutlineEntry> entries, int depth,
-        Dictionary<string, int> depths,
         List<(string key, string title, int depth)> order)
     {
         foreach (var entry in entries)
         {
             var key = HeadingKey(entry.Title, entry.Page);
-            depths[key] = depth;
             order.Add((key, entry.Title, depth));
-            BuildHeadingIndex(entry.Children, depth + 1, depths, order);
+            BuildHeadingIndex(entry.Children, depth + 1, order);
         }
     }
 }
