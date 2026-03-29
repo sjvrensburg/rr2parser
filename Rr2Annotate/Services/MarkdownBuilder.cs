@@ -126,29 +126,35 @@ public partial class MarkdownBuilder
 
     /// <summary>
     /// Emits a group of annotations, deduplicating block text when consecutive
-    /// annotations share the same overlapping blocks.
+    /// annotations share the same overlapping blocks, and deduplicating images
+    /// when grouped freehand annotations share the same screenshot.
     /// </summary>
     private void EmitAnnotationGroup(
         StringBuilder sb,
         List<(int page, int annotIdx, Annotation annotation)> annotations)
     {
         string? lastBlockTextKey = null;
+        var emittedImages = new HashSet<string>();
 
         foreach (var (page, annotIdx, annotation) in annotations)
         {
             var blockText = GetBlockText(annotation.OverlappingBlocks);
             var blockTextKey = string.IsNullOrWhiteSpace(blockText) ? null : blockText;
 
-            // If this annotation shares the same block text as the previous one,
-            // pass suppressContext=true to avoid repeating the block text.
             bool suppressContext = blockTextKey != null && blockTextKey == lastBlockTextKey;
 
-            EmitAnnotation(sb, page, annotIdx, annotation, suppressContext);
+            // Check if this annotation's image has already been emitted (grouped freehand)
+            bool suppressImage = false;
+            if (TryGetImagePath(page, annotIdx, out var imgPath) && !emittedImages.Add(imgPath))
+                suppressImage = true;
+
+            EmitAnnotation(sb, page, annotIdx, annotation, suppressContext, suppressImage);
             lastBlockTextKey = blockTextKey;
         }
     }
 
-    private void EmitAnnotation(StringBuilder sb, int page, int annotIdx, Annotation annotation, bool suppressContext)
+    private void EmitAnnotation(StringBuilder sb, int page, int annotIdx, Annotation annotation,
+        bool suppressContext, bool suppressImage = false)
     {
         switch (annotation)
         {
@@ -162,7 +168,7 @@ public partial class MarkdownBuilder
                 EmitRect(sb, page, annotIdx, rect, suppressContext);
                 break;
             case FreehandAnnotation freehand:
-                EmitFreehand(sb, page, annotIdx, freehand, suppressContext);
+                EmitFreehand(sb, page, annotIdx, freehand, suppressContext, suppressImage);
                 break;
         }
     }
@@ -239,11 +245,12 @@ public partial class MarkdownBuilder
         sb.AppendLine();
     }
 
-    private void EmitFreehand(StringBuilder sb, int page, int annotIdx, FreehandAnnotation freehand, bool suppressContext)
+    private void EmitFreehand(StringBuilder sb, int page, int annotIdx, FreehandAnnotation freehand,
+        bool suppressContext, bool suppressImage = false)
     {
         var hasImage = TryGetImagePath(page, annotIdx, out var imagePath);
 
-        if (hasImage)
+        if (hasImage && !suppressImage)
         {
             sb.AppendLine($"![Freehand annotation, p. {page + 1}]({imagePath})");
             sb.AppendLine();
@@ -259,14 +266,19 @@ public partial class MarkdownBuilder
             }
         }
 
-        if (!hasImage)
+        // Only show the placeholder if there's no image at all (not just suppressed duplicate)
+        if (!hasImage && !suppressImage)
         {
             sb.AppendLine($"> *[Freehand drawing — use `--images` to include a screenshot]*");
             sb.AppendLine($">");
         }
 
-        sb.AppendLine($"> *(p. {page + 1}, freehand)*");
-        sb.AppendLine();
+        // Suppress the per-stroke label for grouped freehand annotations
+        if (!suppressImage)
+        {
+            sb.AppendLine($"> *(p. {page + 1}, freehand)*");
+            sb.AppendLine();
+        }
     }
 
     private bool TryGetImagePath(int page, int annotIdx, out string relativePath)
