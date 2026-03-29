@@ -1,0 +1,158 @@
+using Rr2Annotate.Models;
+using Rr2Annotate.Services;
+
+if (args.Length == 0 || args.Contains("--help") || args.Contains("-h"))
+{
+    PrintUsage();
+    return 0;
+}
+
+// Handle --configure
+if (args.Contains("--configure"))
+{
+    await Settings.EnsureConfigured(forceReconfigure: true);
+    return 0;
+}
+
+// Parse arguments
+string? pdfPath = null;
+string? outputPath = null;
+bool includeImages = false;
+string? pagesArg = null;
+
+for (int i = 0; i < args.Length; i++)
+{
+    switch (args[i])
+    {
+        case "-o" when i + 1 < args.Length:
+            outputPath = args[++i];
+            break;
+        case "--images":
+            includeImages = true;
+            break;
+        case "--pages" when i + 1 < args.Length:
+            pagesArg = args[++i];
+            break;
+        default:
+            if (!args[i].StartsWith('-'))
+                pdfPath = args[i];
+            break;
+    }
+}
+
+if (string.IsNullOrWhiteSpace(pdfPath))
+{
+    Console.Error.WriteLine("Error: No PDF path specified.");
+    PrintUsage();
+    return 1;
+}
+
+if (!File.Exists(pdfPath))
+{
+    Console.Error.WriteLine($"Error: File not found: {pdfPath}");
+    return 1;
+}
+
+// Parse page filter (1-based user input -> 0-based set)
+HashSet<int>? pageFilter = null;
+if (pagesArg != null)
+{
+    pageFilter = ParsePageRange(pagesArg);
+    if (pageFilter == null)
+    {
+        Console.Error.WriteLine($"Error: Invalid page range: {pagesArg}");
+        return 1;
+    }
+}
+
+// Ensure CLI is configured
+var settings = await Settings.EnsureConfigured();
+
+// Default output path
+outputPath ??= Path.ChangeExtension(pdfPath, null) + "-annotations.md";
+
+Console.Error.WriteLine($"Extracting annotations from: {Path.GetFileName(pdfPath)}");
+
+// Extract annotations
+var export = await CliRunner.ExtractAnnotationsAsync(settings.CliCommand, pdfPath);
+
+// Apply page filter
+if (pageFilter != null)
+{
+    export = export with
+    {
+        Pages = export.Pages
+            .Where(p => pageFilter.Contains(p.Page))
+            .ToList()
+    };
+}
+
+var totalAnnotations = export.Pages.Sum(p => p.Annotations.Count);
+Console.Error.WriteLine($"Found {totalAnnotations} annotations across {export.Pages.Count} pages.");
+
+if (totalAnnotations == 0)
+{
+    Console.Error.WriteLine("No annotations found. Nothing to export.");
+    return 0;
+}
+
+// Optionally render and crop screenshots
+Dictionary<(int page, int annotIdx), string>? images = null;
+string? imageRelDir = null;
+
+if (includeImages)
+{
+    var imageDir = Path.ChangeExtension(outputPath, null) + "-images";
+    imageRelDir = Path.GetFileName(imageDir);
+    Console.Error.WriteLine("Rendering screenshots...");
+    images = await ScreenshotService.CropAnnotationsAsync(settings.CliCommand, pdfPath, export, imageDir);
+    Console.Error.WriteLine($"Cropped {images.Count} annotation images.");
+}
+
+// Build markdown
+var builder = new MarkdownBuilder(export, images, imageRelDir);
+var markdown = builder.Build();
+
+File.WriteAllText(outputPath, markdown);
+Console.Error.WriteLine($"Written to: {outputPath}");
+
+return 0;
+
+static HashSet<int>? ParsePageRange(string input)
+{
+    var result = new HashSet<int>();
+    foreach (var part in input.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+    {
+        if (part.Contains('-'))
+        {
+            var bounds = part.Split('-', 2);
+            if (!int.TryParse(bounds[0], out var start) || !int.TryParse(bounds[1], out var end))
+                return null;
+            if (start > end) return null;
+            for (int p = start; p <= end; p++)
+                result.Add(p - 1); // convert to 0-based
+        }
+        else
+        {
+            if (!int.TryParse(part, out var page)) return null;
+            result.Add(page - 1); // convert to 0-based
+        }
+    }
+    return result.Count > 0 ? result : null;
+}
+
+static void PrintUsage()
+{
+    Console.WriteLine("""
+        rr2annotate — Export RailReader2 annotations as Markdown
+
+        Usage: rr2annotate <pdf> [options]
+
+        Options:
+          -o <path>       Output markdown file (default: <pdf-stem>-annotations.md)
+          --pages <range> Only include annotations from these pages (e.g. "1,3,5-10")
+          --images        Include cropped screenshots for rect/freehand annotations
+          --configure     Set or update the path to the RailReader2 CLI
+          -h, --help      Show this help
+        """);
+}
