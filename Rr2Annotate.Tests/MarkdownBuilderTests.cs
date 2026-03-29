@@ -47,7 +47,6 @@ public class MarkdownBuilderTests
     [Fact]
     public void Highlight_Fuzzy_Match_Handles_Whitespace_Differences()
     {
-        // Block text has single spaces, highlight text has different whitespace
         var export = MakeExport(
             outline: [new("Section A", 0, [])],
             pages: [new(0, 595, 842, [
@@ -64,7 +63,6 @@ public class MarkdownBuilderTests
 
         var md = new MarkdownBuilder(export).Build();
 
-        // Should still bold it via fuzzy match, not fall back to "Highlighted:"
         Assert.Contains("**word two**", md);
         Assert.DoesNotContain("Highlighted:", md);
     }
@@ -91,7 +89,7 @@ public class MarkdownBuilderTests
         Assert.Contains("## Methods", md);
         Assert.Contains("Surrounding paragraph text.", md);
         Assert.Contains("**Note:** Clarify this sentence", md);
-        Assert.Contains("*(p. 6, note)*", md); // 0-based page 5 = display page 6
+        Assert.Contains("*(p. 6, note)*", md);
     }
 
     [Fact]
@@ -115,7 +113,7 @@ public class MarkdownBuilderTests
 
         Assert.Contains("Block text under the rectangle.", md);
         Assert.Contains("*(p. 11, rectangle)*", md);
-        Assert.DoesNotContain("![", md); // no image embed
+        Assert.DoesNotContain("![", md);
     }
 
     [Fact]
@@ -222,5 +220,99 @@ public class MarkdownBuilderTests
         Assert.Contains("## Chapter 1", md);
         Assert.Contains("### Section 1.1", md);
         Assert.Contains("#### Subsection 1.1.1", md);
+    }
+
+    [Fact]
+    public void Summary_Table_Is_Emitted()
+    {
+        var export = MakeExport(
+            outline: [new("Chapter 1", 0, [])],
+            pages: [new(0, 595, 842, [
+                new HighlightAnnotation
+                {
+                    Type = "highlight", Color = "#FF0", Opacity = 0.5,
+                    OverlappingBlocks = [], NearestHeading = Heading("Chapter 1", 0),
+                    Rects = [new(50, 50, 100, 10)], Text = "test"
+                },
+                new TextNoteAnnotation
+                {
+                    Type = "text_note", Color = "#FFCC00", Opacity = 0.9,
+                    OverlappingBlocks = [], NearestHeading = Heading("Chapter 1", 0),
+                    X = 100, Y = 200, NoteText = "a note"
+                }
+            ])]);
+
+        var md = new MarkdownBuilder(export).Build();
+
+        Assert.Contains("## Summary", md);
+        Assert.Contains("**2 annotations**", md);
+        Assert.Contains("**1 pages**", md);
+        Assert.Contains("| Chapter 1 | 1 | 1 | 0 | 0 |", md);
+    }
+
+    [Fact]
+    public void Deduplicates_Block_Text_For_Consecutive_Annotations_On_Same_Block()
+    {
+        var sharedBlock = new LayoutBlock("text", 22, new(50, 50, 400, 100), 0.9, 0,
+            "This is the shared paragraph text that should not be repeated.");
+
+        var export = MakeExport(
+            outline: [new("Section", 0, [])],
+            pages: [new(0, 595, 842, [
+                new HighlightAnnotation
+                {
+                    Type = "highlight", Color = "#FF0", Opacity = 0.5,
+                    OverlappingBlocks = [sharedBlock],
+                    NearestHeading = Heading("Section", 0),
+                    Rects = [new(50, 50, 100, 10)],
+                    Text = "shared paragraph"
+                },
+                new TextNoteAnnotation
+                {
+                    Type = "text_note", Color = "#FFCC00", Opacity = 0.9,
+                    OverlappingBlocks = [sharedBlock],
+                    NearestHeading = Heading("Section", 0),
+                    X = 450, Y = 60,
+                    NoteText = "Fix this paragraph"
+                }
+            ])]);
+
+        var md = new MarkdownBuilder(export).Build();
+
+        // The block text should appear once (for the highlight), not twice
+        // The highlight embeds the block text with "shared paragraph" bolded,
+        // so look for the unique tail of the block text
+        var count = CountOccurrences(md, "should not be repeated");
+        Assert.Equal(1, count);
+        // But the note text should still appear
+        Assert.Contains("Fix this paragraph", md);
+    }
+
+    [Fact]
+    public void CleanText_Removes_Soft_Hyphens_And_Control_Chars()
+    {
+        var input = "hyper\u00ADpara\u0002meter opti\u0003misation";
+        var cleaned = MarkdownBuilder.CleanText(input);
+        Assert.Equal("hyperparameter optimisation", cleaned);
+    }
+
+    [Fact]
+    public void CleanText_Collapses_Whitespace()
+    {
+        var input = "word one  word   two\r\nword\tthree";
+        var cleaned = MarkdownBuilder.CleanText(input);
+        Assert.Equal("word one word two word three", cleaned);
+    }
+
+    private static int CountOccurrences(string text, string search)
+    {
+        int count = 0;
+        int idx = 0;
+        while ((idx = text.IndexOf(search, idx, StringComparison.Ordinal)) >= 0)
+        {
+            count++;
+            idx += search.Length;
+        }
+        return count;
     }
 }

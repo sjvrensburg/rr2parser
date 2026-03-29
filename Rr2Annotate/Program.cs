@@ -19,6 +19,7 @@ string? pdfPath = null;
 string? outputPath = null;
 bool includeImages = false;
 string? pagesArg = null;
+string? colorArg = null;
 
 for (int i = 0; i < args.Length; i++)
 {
@@ -32,6 +33,9 @@ for (int i = 0; i < args.Length; i++)
             break;
         case "--pages" when i + 1 < args.Length:
             pagesArg = args[++i];
+            break;
+        case "--color" when i + 1 < args.Length:
+            colorArg = args[++i];
             break;
         default:
             if (!args[i].StartsWith('-'))
@@ -55,12 +59,27 @@ if (!File.Exists(pdfPath))
 
 // Parse page filter (1-based user input -> 0-based set)
 HashSet<int>? pageFilter = null;
+string? cliPageRange = null;
 if (pagesArg != null)
 {
     pageFilter = ParsePageRange(pagesArg);
     if (pageFilter == null)
     {
         Console.Error.WriteLine($"Error: Invalid page range: {pagesArg}");
+        return 1;
+    }
+    // Pass the raw range string to the CLI for server-side filtering
+    cliPageRange = pagesArg;
+}
+
+// Parse colour filter
+HashSet<string>? colorFilter = null;
+if (colorArg != null)
+{
+    colorFilter = ParseColorFilter(colorArg);
+    if (colorFilter == null || colorFilter.Count == 0)
+    {
+        Console.Error.WriteLine($"Error: Invalid colour filter: {colorArg}");
         return 1;
     }
 }
@@ -73,16 +92,33 @@ outputPath ??= Path.ChangeExtension(pdfPath, null) + "-annotations.md";
 
 Console.Error.WriteLine($"Extracting annotations from: {Path.GetFileName(pdfPath)}");
 
-// Extract annotations
-var export = await CliRunner.ExtractAnnotationsAsync(settings.CliCommand, pdfPath);
+// Extract annotations (pass page range to CLI for faster extraction)
+var export = await CliRunner.ExtractAnnotationsAsync(settings.CliCommand, pdfPath, cliPageRange);
 
-// Apply page filter
+// Apply page filter (belt-and-suspenders: CLI may not support --pages on annotations)
 if (pageFilter != null)
 {
     export = export with
     {
         Pages = export.Pages
             .Where(p => pageFilter.Contains(p.Page))
+            .ToList()
+    };
+}
+
+// Apply colour filter
+if (colorFilter != null)
+{
+    export = export with
+    {
+        Pages = export.Pages
+            .Select(p => p with
+            {
+                Annotations = p.Annotations
+                    .Where(a => colorFilter.Contains(NormalizeColor(a.Color)))
+                    .ToList()
+            })
+            .Where(p => p.Annotations.Count > 0)
             .ToList()
     };
 }
@@ -141,6 +177,28 @@ static HashSet<int>? ParsePageRange(string input)
     return result.Count > 0 ? result : null;
 }
 
+static HashSet<string>? ParseColorFilter(string input)
+{
+    var result = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    foreach (var part in input.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+    {
+        var color = NormalizeColor(part);
+        if (string.IsNullOrEmpty(color)) return null;
+        result.Add(color);
+    }
+    return result;
+}
+
+static string NormalizeColor(string color)
+{
+    // Strip # prefix, lowercase
+    var c = color.TrimStart('#').ToLowerInvariant();
+    // Expand 3-char hex to 6-char: "f00" -> "ff0000"
+    if (c.Length == 3)
+        c = $"{c[0]}{c[0]}{c[1]}{c[1]}{c[2]}{c[2]}";
+    return c;
+}
+
 static void PrintUsage()
 {
     Console.WriteLine("""
@@ -151,6 +209,7 @@ static void PrintUsage()
         Options:
           -o <path>       Output markdown file (default: <pdf-stem>-annotations.md)
           --pages <range> Only include annotations from these pages (e.g. "1,3,5-10")
+          --color <hex>   Filter by annotation colour (e.g. "#FF0000" or "ff0000,ffcc00")
           --images        Include cropped screenshots for rect/freehand annotations
           --configure     Set or update the path to the RailReader2 CLI
           -h, --help      Show this help
