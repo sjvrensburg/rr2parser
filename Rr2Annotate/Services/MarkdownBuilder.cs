@@ -147,34 +147,35 @@ public class MarkdownBuilder
             if (TryGetImagePath(page, annotIdx, out var imgPath) && !emittedImages.Add(imgPath))
                 suppressImage = true;
 
-            EmitAnnotation(sb, page, annotIdx, annotation, suppressContext, suppressImage);
+            EmitAnnotation(sb, page, annotIdx, annotation, suppressContext, suppressImage,
+                suppressContext ? null : blockText);
             lastBlockTextKey = blockTextKey;
         }
     }
 
     private void EmitAnnotation(StringBuilder sb, int page, int annotIdx, Annotation annotation,
-        bool suppressContext, bool suppressImage = false)
+        bool suppressContext, bool suppressImage, string? blockText)
     {
         switch (annotation)
         {
             case HighlightAnnotation highlight:
-                EmitHighlight(sb, page, highlight, suppressContext);
+                EmitHighlight(sb, page, highlight, suppressContext, blockText);
                 break;
             case TextNoteAnnotation note:
-                EmitTextNote(sb, page, note, suppressContext);
+                EmitTextNote(sb, page, note, suppressContext, blockText);
                 break;
             case RectAnnotation rect:
-                EmitRect(sb, page, annotIdx, rect, suppressContext);
+                EmitRect(sb, page, annotIdx, rect, suppressContext, blockText);
                 break;
             case FreehandAnnotation freehand:
-                EmitFreehand(sb, page, annotIdx, freehand, suppressContext, suppressImage);
+                EmitFreehand(sb, page, annotIdx, freehand, suppressContext, suppressImage, blockText);
                 break;
         }
     }
 
-    private void EmitHighlight(StringBuilder sb, int page, HighlightAnnotation highlight, bool suppressContext)
+    private void EmitHighlight(StringBuilder sb, int page, HighlightAnnotation highlight,
+        bool suppressContext, string? blockText)
     {
-        var blockText = suppressContext ? null : GetBlockText(highlight.OverlappingBlocks);
         var highlightedText = CleanText(highlight.Text ?? "");
 
         if (!string.IsNullOrWhiteSpace(blockText) && !string.IsNullOrWhiteSpace(highlightedText))
@@ -196,16 +197,13 @@ public class MarkdownBuilder
         sb.AppendLine();
     }
 
-    private void EmitTextNote(StringBuilder sb, int page, TextNoteAnnotation note, bool suppressContext)
+    private void EmitTextNote(StringBuilder sb, int page, TextNoteAnnotation note,
+        bool suppressContext, string? blockText)
     {
-        if (!suppressContext)
+        if (!suppressContext && !string.IsNullOrWhiteSpace(blockText))
         {
-            var blockText = GetBlockText(note.OverlappingBlocks);
-            if (!string.IsNullOrWhiteSpace(blockText))
-            {
-                sb.AppendLine($"> {blockText}");
-                sb.AppendLine(">");
-            }
+            sb.AppendLine($"> {blockText}");
+            sb.AppendLine(">");
         }
 
         sb.AppendLine($"> **Note:** {note.NoteText}");
@@ -214,7 +212,8 @@ public class MarkdownBuilder
         sb.AppendLine();
     }
 
-    private void EmitRect(StringBuilder sb, int page, int annotIdx, RectAnnotation rect, bool suppressContext)
+    private void EmitRect(StringBuilder sb, int page, int annotIdx, RectAnnotation rect,
+        bool suppressContext, string? blockText)
     {
         var hasImage = TryGetImagePath(page, annotIdx, out var imagePath);
 
@@ -226,7 +225,6 @@ public class MarkdownBuilder
 
         if (!suppressContext)
         {
-            var blockText = GetBlockText(rect.OverlappingBlocks);
             var rectText = CleanText(rect.Text ?? "");
 
             if (!string.IsNullOrWhiteSpace(blockText))
@@ -245,7 +243,7 @@ public class MarkdownBuilder
     }
 
     private void EmitFreehand(StringBuilder sb, int page, int annotIdx, FreehandAnnotation freehand,
-        bool suppressContext, bool suppressImage = false)
+        bool suppressContext, bool suppressImage, string? blockText)
     {
         var hasImage = TryGetImagePath(page, annotIdx, out var imagePath);
 
@@ -255,14 +253,10 @@ public class MarkdownBuilder
             sb.AppendLine();
         }
 
-        if (!suppressContext)
+        if (!suppressContext && !string.IsNullOrWhiteSpace(blockText))
         {
-            var blockText = GetBlockText(freehand.OverlappingBlocks);
-            if (!string.IsNullOrWhiteSpace(blockText))
-            {
-                sb.AppendLine($"> {blockText}");
-                sb.AppendLine($">");
-            }
+            sb.AppendLine($"> {blockText}");
+            sb.AppendLine($">");
         }
 
         if (!hasImage)
@@ -313,13 +307,12 @@ public class MarkdownBuilder
     {
         var sb = new StringBuilder(original.Length);
         var map = new int[original.Length + 1];
-        bool lastWasSpace = true; // suppress leading whitespace
+        bool lastWasSpace = true;
 
         for (int i = 0; i < original.Length; i++)
         {
             char c = original[i];
 
-            // Skip PDF artifacts and control characters
             if (c == '\u00AD' || c == '\u0002' || c == '\u0003') continue;
             if (char.IsControl(c) && c != '\n' && c != '\r' && c != '\t') continue;
 
@@ -341,11 +334,11 @@ public class MarkdownBuilder
         }
 
         // Trim trailing whitespace
-        int len = sb.Length;
-        while (len > 0 && sb[len - 1] == ' ') len--;
-        map[len] = original.Length;
+        while (sb.Length > 0 && sb[sb.Length - 1] == ' ')
+            sb.Length--;
+        map[sb.Length] = original.Length;
 
-        return (sb.ToString(0, len), map);
+        return (sb.ToString(), map);
     }
 
     /// <summary>
