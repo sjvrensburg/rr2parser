@@ -1,10 +1,9 @@
 using System.Text;
-using System.Text.RegularExpressions;
 using Rr2Annotate.Models;
 
 namespace Rr2Annotate.Services;
 
-public partial class MarkdownBuilder
+public class MarkdownBuilder
 {
     private readonly AnnotationExport _export;
     private readonly Dictionary<(int page, int annotIdx), string>? _images;
@@ -148,34 +147,35 @@ public partial class MarkdownBuilder
             if (TryGetImagePath(page, annotIdx, out var imgPath) && !emittedImages.Add(imgPath))
                 suppressImage = true;
 
-            EmitAnnotation(sb, page, annotIdx, annotation, suppressContext, suppressImage);
+            EmitAnnotation(sb, page, annotIdx, annotation, suppressContext, suppressImage,
+                suppressContext ? null : blockText);
             lastBlockTextKey = blockTextKey;
         }
     }
 
     private void EmitAnnotation(StringBuilder sb, int page, int annotIdx, Annotation annotation,
-        bool suppressContext, bool suppressImage = false)
+        bool suppressContext, bool suppressImage, string? blockText)
     {
         switch (annotation)
         {
             case HighlightAnnotation highlight:
-                EmitHighlight(sb, page, highlight, suppressContext);
+                EmitHighlight(sb, page, highlight, suppressContext, blockText);
                 break;
             case TextNoteAnnotation note:
-                EmitTextNote(sb, page, note, suppressContext);
+                EmitTextNote(sb, page, note, suppressContext, blockText);
                 break;
             case RectAnnotation rect:
-                EmitRect(sb, page, annotIdx, rect, suppressContext);
+                EmitRect(sb, page, annotIdx, rect, suppressContext, blockText);
                 break;
             case FreehandAnnotation freehand:
-                EmitFreehand(sb, page, annotIdx, freehand, suppressContext, suppressImage);
+                EmitFreehand(sb, page, annotIdx, freehand, suppressContext, suppressImage, blockText);
                 break;
         }
     }
 
-    private void EmitHighlight(StringBuilder sb, int page, HighlightAnnotation highlight, bool suppressContext)
+    private void EmitHighlight(StringBuilder sb, int page, HighlightAnnotation highlight,
+        bool suppressContext, string? blockText)
     {
-        var blockText = suppressContext ? null : GetBlockText(highlight.OverlappingBlocks);
         var highlightedText = CleanText(highlight.Text ?? "");
 
         if (!string.IsNullOrWhiteSpace(blockText) && !string.IsNullOrWhiteSpace(highlightedText))
@@ -197,16 +197,13 @@ public partial class MarkdownBuilder
         sb.AppendLine();
     }
 
-    private void EmitTextNote(StringBuilder sb, int page, TextNoteAnnotation note, bool suppressContext)
+    private void EmitTextNote(StringBuilder sb, int page, TextNoteAnnotation note,
+        bool suppressContext, string? blockText)
     {
-        if (!suppressContext)
+        if (!suppressContext && !string.IsNullOrWhiteSpace(blockText))
         {
-            var blockText = GetBlockText(note.OverlappingBlocks);
-            if (!string.IsNullOrWhiteSpace(blockText))
-            {
-                sb.AppendLine($"> {blockText}");
-                sb.AppendLine(">");
-            }
+            sb.AppendLine($"> {blockText}");
+            sb.AppendLine(">");
         }
 
         sb.AppendLine($"> **Note:** {note.NoteText}");
@@ -215,7 +212,8 @@ public partial class MarkdownBuilder
         sb.AppendLine();
     }
 
-    private void EmitRect(StringBuilder sb, int page, int annotIdx, RectAnnotation rect, bool suppressContext)
+    private void EmitRect(StringBuilder sb, int page, int annotIdx, RectAnnotation rect,
+        bool suppressContext, string? blockText)
     {
         var hasImage = TryGetImagePath(page, annotIdx, out var imagePath);
 
@@ -227,7 +225,6 @@ public partial class MarkdownBuilder
 
         if (!suppressContext)
         {
-            var blockText = GetBlockText(rect.OverlappingBlocks);
             var rectText = CleanText(rect.Text ?? "");
 
             if (!string.IsNullOrWhiteSpace(blockText))
@@ -246,7 +243,7 @@ public partial class MarkdownBuilder
     }
 
     private void EmitFreehand(StringBuilder sb, int page, int annotIdx, FreehandAnnotation freehand,
-        bool suppressContext, bool suppressImage = false)
+        bool suppressContext, bool suppressImage, string? blockText)
     {
         var hasImage = TryGetImagePath(page, annotIdx, out var imagePath);
 
@@ -256,14 +253,10 @@ public partial class MarkdownBuilder
             sb.AppendLine();
         }
 
-        if (!suppressContext)
+        if (!suppressContext && !string.IsNullOrWhiteSpace(blockText))
         {
-            var blockText = GetBlockText(freehand.OverlappingBlocks);
-            if (!string.IsNullOrWhiteSpace(blockText))
-            {
-                sb.AppendLine($"> {blockText}");
-                sb.AppendLine($">");
-            }
+            sb.AppendLine($"> {blockText}");
+            sb.AppendLine($">");
         }
 
         if (!hasImage)
@@ -306,35 +299,57 @@ public partial class MarkdownBuilder
     }
 
     /// <summary>
+    /// Strips PDF artifacts and collapses whitespace in a single pass.
+    /// Returns the cleaned text and a map from normalised positions back to
+    /// original string indices.
+    /// </summary>
+    private static (string text, int[] map) NormalizeWithMap(string original)
+    {
+        var sb = new StringBuilder(original.Length);
+        var map = new int[original.Length + 1];
+        bool lastWasSpace = true;
+
+        for (int i = 0; i < original.Length; i++)
+        {
+            char c = original[i];
+
+            if (c == '\u00AD' || c == '\u0002' || c == '\u0003') continue;
+            if (char.IsControl(c) && c != '\n' && c != '\r' && c != '\t') continue;
+
+            if (char.IsWhiteSpace(c))
+            {
+                if (!lastWasSpace)
+                {
+                    map[sb.Length] = i;
+                    sb.Append(' ');
+                    lastWasSpace = true;
+                }
+            }
+            else
+            {
+                map[sb.Length] = i;
+                sb.Append(c);
+                lastWasSpace = false;
+            }
+        }
+
+        // Trim trailing whitespace
+        while (sb.Length > 0 && sb[sb.Length - 1] == ' ')
+            sb.Length--;
+        map[sb.Length] = original.Length;
+
+        return (sb.ToString(), map);
+    }
+
+    /// <summary>
     /// Cleans extracted PDF text: removes control characters, soft hyphens,
     /// normalises whitespace, and trims.
     /// </summary>
     internal static string CleanText(string text)
     {
-        // Remove soft hyphens (U+00AD) and other zero-width/control chars
-        // but keep standard whitespace
-        var cleaned = new StringBuilder(text.Length);
-        foreach (var c in text)
-        {
-            if (c == '\u00AD') continue;                             // soft hyphen
-            if (c == '\u0002' || c == '\u0003') continue;            // STX/ETX (PDF artifacts)
-            if (char.IsControl(c) && c != '\n' && c != '\r' && c != '\t')
-                continue;
-            cleaned.Append(c);
-        }
-
-        // Normalise all whitespace (line breaks, tabs) to single spaces
-        return MultipleSpacesRegex().Replace(
-            cleaned.ToString()
-                .Replace("\r\n", " ")
-                .Replace("\r", " ")
-                .Replace("\n", " ")
-                .Replace("\t", " "),
-            " ").Trim();
+        var (result, _) = NormalizeWithMap(text);
+        return result;
     }
-
-    [GeneratedRegex(@"\s{2,}")]
-    private static partial Regex MultipleSpacesRegex();
 
     private static string BoldHighlightInContext(string blockText, string highlightText)
     {
@@ -347,15 +362,15 @@ public partial class MarkdownBuilder
                 + blockText[(idx + highlightText.Length)..];
         }
 
-        // Fuzzy match: collapse whitespace in both strings
-        var normBlock = CollapseWhitespace(blockText);
-        var normHighlight = CollapseWhitespace(highlightText);
+        // Fuzzy match: normalize whitespace and retry
+        var (normBlock, blockMap) = NormalizeWithMap(blockText);
+        var normHighlight = CleanText(highlightText);
 
         var normIdx = normBlock.IndexOf(normHighlight, StringComparison.OrdinalIgnoreCase);
         if (normIdx >= 0)
         {
-            var origStart = MapNormalizedIndex(blockText, normIdx);
-            var origEnd = MapNormalizedIndex(blockText, normIdx + normHighlight.Length);
+            var origStart = blockMap[normIdx];
+            var origEnd = blockMap[normIdx + normHighlight.Length];
 
             return blockText[..origStart]
                 + "**" + blockText[origStart..origEnd] + "**"
@@ -364,50 +379,6 @@ public partial class MarkdownBuilder
 
         // Last resort
         return $"{blockText}\n>\n> **Highlighted:** {highlightText}";
-    }
-
-    private static string CollapseWhitespace(string text)
-    {
-        var sb = new StringBuilder(text.Length);
-        bool lastWasSpace = false;
-        foreach (var c in text)
-        {
-            if (char.IsWhiteSpace(c))
-            {
-                if (!lastWasSpace) sb.Append(' ');
-                lastWasSpace = true;
-            }
-            else
-            {
-                sb.Append(c);
-                lastWasSpace = false;
-            }
-        }
-        return sb.ToString().Trim();
-    }
-
-    private static int MapNormalizedIndex(string original, int normalizedIndex)
-    {
-        int ni = 0;
-        bool lastWasSpace = false;
-        int oi = 0;
-        while (oi < original.Length && char.IsWhiteSpace(original[oi])) oi++;
-
-        while (oi < original.Length && ni < normalizedIndex)
-        {
-            if (char.IsWhiteSpace(original[oi]))
-            {
-                if (!lastWasSpace) ni++;
-                lastWasSpace = true;
-            }
-            else
-            {
-                ni++;
-                lastWasSpace = false;
-            }
-            oi++;
-        }
-        return oi;
     }
 
     private static string HeadingKey(string title, int page) => $"{title}||{page}";
