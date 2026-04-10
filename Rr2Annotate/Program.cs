@@ -60,6 +60,14 @@ if (!File.Exists(pdfPath))
 // Pass page range directly to CLI (CLI validates natively)
 string? cliPageRange = pagesArg;
 
+// Stdout mode: -o - writes markdown to stdout (incompatible with --images)
+bool stdoutMode = outputPath == "-";
+if (stdoutMode && includeImages)
+{
+    Console.Error.WriteLine("Error: --images is not compatible with -o - (stdout output).");
+    return 1;
+}
+
 // Parse colour filter
 HashSet<string>? colorFilter = null;
 if (colorArg != null)
@@ -75,8 +83,9 @@ if (colorArg != null)
 // Ensure CLI is configured
 var settings = await Settings.EnsureConfigured();
 
-// Default output path
-outputPath ??= Path.ChangeExtension(pdfPath, null) + "-annotations.md";
+// Default output path (skip for stdout mode)
+if (!stdoutMode)
+    outputPath ??= Path.ChangeExtension(pdfPath, null) + "-annotations.md";
 
 Console.Error.WriteLine($"Extracting annotations from: {Path.GetFileName(pdfPath)}");
 
@@ -126,8 +135,15 @@ if (includeImages)
 var builder = new MarkdownBuilder(export, images, imageRelDir);
 var markdown = builder.Build();
 
-File.WriteAllText(outputPath, markdown);
-Console.Error.WriteLine($"Written to: {outputPath}");
+if (stdoutMode)
+{
+    Console.Write(markdown);
+}
+else
+{
+    File.WriteAllText(outputPath!, markdown);
+    Console.Error.WriteLine($"Written to: {outputPath}");
+}
 
 return 0;
 
@@ -161,7 +177,7 @@ static void PrintUsage()
         Usage: rr2annotate <pdf> [options]
 
         Options:
-          -o <path>       Output markdown file (default: <pdf-stem>-annotations.md)
+          -o <path>       Output file (default: <pdf-stem>-annotations.md). Use - to write to stdout
           --pages <range> Only include annotations from these pages (e.g. "1,3,5-10")
           --color <hex>   Filter by annotation colour (e.g. "#FF0000" or "ff0000,ffcc00")
           --images        Include cropped screenshots for rect/freehand annotations
