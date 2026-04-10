@@ -57,20 +57,8 @@ if (!File.Exists(pdfPath))
     return 1;
 }
 
-// Parse page filter (1-based user input -> 0-based set)
-HashSet<int>? pageFilter = null;
-string? cliPageRange = null;
-if (pagesArg != null)
-{
-    pageFilter = ParsePageRange(pagesArg);
-    if (pageFilter == null)
-    {
-        Console.Error.WriteLine($"Error: Invalid page range: {pagesArg}");
-        return 1;
-    }
-    // Pass the raw range string to the CLI for server-side filtering
-    cliPageRange = pagesArg;
-}
+// Pass page range directly to CLI (CLI validates natively)
+string? cliPageRange = pagesArg;
 
 // Parse colour filter
 HashSet<string>? colorFilter = null;
@@ -94,17 +82,6 @@ Console.Error.WriteLine($"Extracting annotations from: {Path.GetFileName(pdfPath
 
 // Extract annotations (pass page range to CLI for faster extraction)
 var export = await CliRunner.ExtractAnnotationsAsync(settings.CliCommand, pdfPath, cliPageRange);
-
-// Apply page filter (belt-and-suspenders: CLI may not support --pages on annotations)
-if (pageFilter != null)
-{
-    export = export with
-    {
-        Pages = export.Pages
-            .Where(p => pageFilter.Contains(p.Page))
-            .ToList()
-    };
-}
 
 // Apply colour filter
 if (colorFilter != null)
@@ -153,29 +130,6 @@ File.WriteAllText(outputPath, markdown);
 Console.Error.WriteLine($"Written to: {outputPath}");
 
 return 0;
-
-static HashSet<int>? ParsePageRange(string input)
-{
-    var result = new HashSet<int>();
-    foreach (var part in input.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
-    {
-        if (part.Contains('-'))
-        {
-            var bounds = part.Split('-', 2);
-            if (!int.TryParse(bounds[0], out var start) || !int.TryParse(bounds[1], out var end))
-                return null;
-            if (start > end) return null;
-            for (int p = start; p <= end; p++)
-                result.Add(p - 1); // convert to 0-based
-        }
-        else
-        {
-            if (!int.TryParse(part, out var page)) return null;
-            result.Add(page - 1); // convert to 0-based
-        }
-    }
-    return result.Count > 0 ? result : null;
-}
 
 static HashSet<string>? ParseColorFilter(string input)
 {

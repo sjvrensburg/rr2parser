@@ -266,8 +266,7 @@ public partial class MarkdownBuilder
             }
         }
 
-        // Only show the placeholder if there's no image at all (not just suppressed duplicate)
-        if (!hasImage && !suppressImage)
+        if (!hasImage)
         {
             sb.AppendLine($"> *[Freehand drawing — use `--images` to include a screenshot]*");
             sb.AppendLine($">");

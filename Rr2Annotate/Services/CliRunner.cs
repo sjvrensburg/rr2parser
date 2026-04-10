@@ -87,15 +87,6 @@ public static class CliRunner
             }
         }
 
-        // Fallback: if parsing found nothing, discover files by sorted listing
-        if (result.Count == 0)
-        {
-            var pagesList = pages.OrderBy(p => p).ToList();
-            var files = Directory.GetFiles(outputDir, "*.png").OrderBy(f => f).ToArray();
-            for (int i = 0; i < Math.Min(pagesList.Count, files.Length); i++)
-                result[pagesList[i]] = files[i];
-        }
-
         return result;
     }
 

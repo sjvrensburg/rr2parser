@@ -14,8 +14,7 @@ public class MarkdownBuilderTests
             ExportedAt: "2026-01-01T00:00:00Z",
             PageCount: 100,
             Outline: outline ?? [],
-            Pages: pages ?? [],
-            Bookmarks: []);
+            Pages: pages ?? []);
     }
 
     private static NearestHeading Heading(string title, int page) => new(title, "outline", page);
