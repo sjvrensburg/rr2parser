@@ -84,6 +84,14 @@ if (!File.Exists(pdfPath))
 // Pass page range directly to CLI (CLI validates natively)
 string? cliPageRange = pagesArg;
 
+// Stdout mode: -o - writes markdown to stdout (incompatible with --images)
+bool stdoutMode = outputPath == "-";
+if (stdoutMode && includeImages)
+{
+    Console.Error.WriteLine("Error: --images is not compatible with -o - (stdout output).");
+    return 1;
+}
+
 // Parse colour filter
 HashSet<string>? colorFilter = null;
 if (colorArg != null)
@@ -115,14 +123,6 @@ if (exportMode && (colorArg != null || includeImages))
 if (includeImages && contextMode)
 {
     Console.Error.WriteLine("Error: --images with --context is not yet supported (use --images or --context separately).");
-    return 1;
-}
-
-// Stdout mode: -o - writes markdown to stdout (incompatible with --images)
-bool stdoutMode = outputPath == "-";
-if (stdoutMode && includeImages)
-{
-    Console.Error.WriteLine("Error: --images is not compatible with -o - (stdout output).");
     return 1;
 }
 
