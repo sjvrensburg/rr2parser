@@ -54,6 +54,34 @@ public static class CliRunner
     }
 
     /// <summary>
+    /// Runs the RailReader2 export command and returns the Markdown output.
+    /// </summary>
+    public static async Task<string> ExportAsync(
+        string cliCommand, string pdfPath, string? cliPageRange = null,
+        bool noVlm = false, string? vlmEndpoint = null, string? vlmModel = null,
+        string? vlmApiKey = null, string? figureDir = null, bool noAnnotations = false)
+    {
+        var args = $"export \"{pdfPath}\"";
+        if (cliPageRange != null)
+            args += $" --pages \"{cliPageRange}\"";
+        if (noVlm)
+            args += " --no-vlm";
+        if (vlmEndpoint != null)
+            args += $" --endpoint \"{vlmEndpoint}\"";
+        if (vlmModel != null)
+            args += $" --model \"{vlmModel}\"";
+        if (vlmApiKey != null)
+            args += $" --api-key \"{vlmApiKey}\"";
+        if (figureDir != null)
+            args += $" --figure-dir \"{figureDir}\"";
+        if (noAnnotations)
+            args += " --no-annotations";
+
+        var (stdout, _) = await RunAsync(cliCommand, args);
+        return stdout;
+    }
+
+    /// <summary>
     /// Renders pages and returns a mapping of 0-based page index to rendered file path,
     /// parsed from the CLI's stderr output.
     /// </summary>

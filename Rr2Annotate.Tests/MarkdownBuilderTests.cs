@@ -303,6 +303,167 @@ public class MarkdownBuilderTests
         Assert.Equal("word one word two word three", cleaned);
     }
 
+    [Fact]
+    public void Enriched_Label_For_Equation_Block()
+    {
+        var export = MakeExport(
+            outline: [new("Chapter 1", 0, [])],
+            pages: [new(0, 595, 842, [
+                new HighlightAnnotation
+                {
+                    Type = "highlight", Color = "#FF0", Opacity = 0.5,
+                    OverlappingBlocks = [new("equation", 3, new(50, 50, 400, 100), 0.9, 0,
+                        "E = mc^2")],
+                    NearestHeading = Heading("Chapter 1", 0),
+                    Rects = [new(50, 50, 100, 10)],
+                    Text = "E = mc^2"
+                }
+            ])]);
+
+        var md = new MarkdownBuilder(export).Build();
+
+        Assert.Contains("*(p. 1, highlighted equation)*", md);
+        Assert.DoesNotContain("*(p. 1, highlight)*", md);
+    }
+
+    [Fact]
+    public void Enriched_Label_Falls_Back_For_Unknown_Class()
+    {
+        var export = MakeExport(
+            outline: [new("Chapter 1", 0, [])],
+            pages: [new(0, 595, 842, [
+                new HighlightAnnotation
+                {
+                    Type = "highlight", Color = "#FF0", Opacity = 0.5,
+                    OverlappingBlocks = [new("text", 22, new(50, 50, 400, 100), 0.9, 0,
+                        "Normal paragraph text")],
+                    NearestHeading = Heading("Chapter 1", 0),
+                    Rects = [new(50, 50, 100, 10)],
+                    Text = "Normal"
+                }
+            ])]);
+
+        var md = new MarkdownBuilder(export).Build();
+
+        Assert.Contains("*(p. 1, highlight)*", md);
+    }
+
+    [Fact]
+    public void Highlight_Uses_Page_Context_When_Block_Text_Fails()
+    {
+        // Highlight text is NOT in block text but IS in page context
+        var export = MakeExport(
+            outline: [new("Chapter 1", 0, [])],
+            pages: [new(0, 595, 842, [
+                new HighlightAnnotation
+                {
+                    Type = "highlight", Color = "#FF0", Opacity = 0.5,
+                    OverlappingBlocks = [new("text", 22, new(50, 50, 400, 100), 0.9, 0,
+                        "A short block text snippet.")],
+                    NearestHeading = Heading("Chapter 1", 0),
+                    Rects = [new(50, 50, 100, 10)],
+                    Text = "distant phrase"
+                }
+            ])]);
+
+        var pageContext = new Dictionary<int, string>
+        {
+            [0] = "Some introductory text before the distant phrase that continues after."
+        };
+
+        var md = new MarkdownBuilder(export, pageContext: pageContext).Build();
+
+        Assert.Contains("**distant phrase**", md);
+        Assert.DoesNotContain("Highlighted:", md); // no fallback
+    }
+
+    [Fact]
+    public void Highlight_Block_Text_Takes_Precedence_Over_Page_Context()
+    {
+        // Highlight text is in both block text and page context — block text wins
+        var export = MakeExport(
+            outline: [new("Chapter 1", 0, [])],
+            pages: [new(0, 595, 842, [
+                new HighlightAnnotation
+                {
+                    Type = "highlight", Color = "#FF0", Opacity = 0.5,
+                    OverlappingBlocks = [new("text", 22, new(50, 50, 400, 100), 0.9, 0,
+                        "Block text with the keyword inside it.")],
+                    NearestHeading = Heading("Chapter 1", 0),
+                    Rects = [new(50, 50, 100, 10)],
+                    Text = "keyword"
+                }
+            ])]);
+
+        var pageContext = new Dictionary<int, string>
+        {
+            [0] = "Full page text with keyword somewhere else entirely."
+        };
+
+        var md = new MarkdownBuilder(export, pageContext: pageContext).Build();
+
+        // Should use block text (has "Block text with" prefix), not page context
+        Assert.Contains("Block text with the **keyword** inside it.", md);
+    }
+
+    [Fact]
+    public void Highlight_Page_Context_Fallback_Still_Fails_Gracefully()
+    {
+        // Highlight text is in neither block text nor page context
+        var export = MakeExport(
+            outline: [new("Chapter 1", 0, [])],
+            pages: [new(0, 595, 842, [
+                new HighlightAnnotation
+                {
+                    Type = "highlight", Color = "#FF0", Opacity = 0.5,
+                    OverlappingBlocks = [new("text", 22, new(50, 50, 400, 100), 0.9, 0,
+                        "Some unrelated block text.")],
+                    NearestHeading = Heading("Chapter 1", 0),
+                    Rects = [new(50, 50, 100, 10)],
+                    Text = "completely missing text"
+                }
+            ])]);
+
+        var pageContext = new Dictionary<int, string>
+        {
+            [0] = "Page text that also does not contain the highlight."
+        };
+
+        var md = new MarkdownBuilder(export, pageContext: pageContext).Build();
+
+        Assert.Contains("Highlighted:", md);
+    }
+
+    [Fact]
+    public void Extracted_Figures_Section_Appended()
+    {
+        var export = MakeExport(pages: [new(0, 595, 842, [])]);
+
+        var figures = new List<FigureReference>
+        {
+            new("Bar chart showing results", "figures/fig-p5-001.png", 4),
+            new("Scatter plot of correlations", "figures/fig-p12-002.png", 11)
+        };
+
+        var md = new MarkdownBuilder(export, extractedFigures: figures).Build();
+
+        Assert.Contains("## Extracted Figures", md);
+        Assert.Contains("![Bar chart showing results](figures/fig-p5-001.png)", md);
+        Assert.Contains("![Scatter plot of correlations](figures/fig-p12-002.png)", md);
+        Assert.Contains("*(p. 5)*", md);
+        Assert.Contains("*(p. 12)*", md);
+    }
+
+    [Fact]
+    public void No_Extracted_Figures_Section_When_Empty()
+    {
+        var export = MakeExport(pages: [new(0, 595, 842, [])]);
+
+        var md = new MarkdownBuilder(export, extractedFigures: []).Build();
+
+        Assert.DoesNotContain("## Extracted Figures", md);
+    }
+
     private static int CountOccurrences(string text, string search)
     {
         int count = 0;
