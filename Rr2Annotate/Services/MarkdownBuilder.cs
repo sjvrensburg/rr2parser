@@ -8,15 +8,21 @@ public class MarkdownBuilder
     private readonly AnnotationExport _export;
     private readonly Dictionary<(int page, int annotIdx), string>? _images;
     private readonly string? _imageRelDir;
+    private readonly Dictionary<int, string>? _pageContext;
+    private readonly List<FigureReference>? _extractedFigures;
 
     public MarkdownBuilder(
         AnnotationExport export,
         Dictionary<(int page, int annotIdx), string>? images = null,
-        string? imageRelDir = null)
+        string? imageRelDir = null,
+        Dictionary<int, string>? pageContext = null,
+        List<FigureReference>? extractedFigures = null)
     {
         _export = export;
         _images = images;
         _imageRelDir = imageRelDir;
+        _pageContext = pageContext;
+        _extractedFigures = extractedFigures;
     }
 
     public string Build()
@@ -80,6 +86,19 @@ public class MarkdownBuilder
             sb.AppendLine("## Other Annotations");
             sb.AppendLine();
             EmitAnnotationGroup(sb, ungrouped);
+        }
+
+        // Extracted figures from RailReader2 export
+        if (_extractedFigures is { Count: > 0 })
+        {
+            sb.AppendLine("## Extracted Figures");
+            sb.AppendLine();
+            foreach (var fig in _extractedFigures)
+            {
+                sb.AppendLine($"![{fig.Description}]({fig.RelativePath})");
+                sb.AppendLine($"*(p. {fig.Page + 1})*");
+                sb.AppendLine();
+            }
         }
 
         return sb.ToString();
@@ -180,7 +199,7 @@ public class MarkdownBuilder
 
         if (!string.IsNullOrWhiteSpace(blockText) && !string.IsNullOrWhiteSpace(highlightedText))
         {
-            var bolded = BoldHighlightInContext(blockText, highlightedText);
+            var bolded = BoldHighlightInContext(blockText, highlightedText, page);
             sb.AppendLine($"> {bolded}");
         }
         else if (!string.IsNullOrWhiteSpace(highlightedText))
@@ -193,7 +212,7 @@ public class MarkdownBuilder
         }
 
         sb.AppendLine($">");
-        sb.AppendLine($"> *(p. {page + 1}, highlight)*");
+        sb.AppendLine($"> {GetEnrichedLabel(page, highlight, "highlight")}");
         sb.AppendLine();
     }
 
@@ -208,7 +227,7 @@ public class MarkdownBuilder
 
         sb.AppendLine($"> **Note:** {note.NoteText}");
         sb.AppendLine($">");
-        sb.AppendLine($"> *(p. {page + 1}, note)*");
+        sb.AppendLine($"> {GetEnrichedLabel(page, note, "note")}");
         sb.AppendLine();
     }
 
@@ -238,7 +257,7 @@ public class MarkdownBuilder
         }
 
         sb.AppendLine($">");
-        sb.AppendLine($"> *(p. {page + 1}, rectangle)*");
+        sb.AppendLine($"> {GetEnrichedLabel(page, rect, "rectangle")}");
         sb.AppendLine();
     }
 
@@ -268,7 +287,7 @@ public class MarkdownBuilder
         // Suppress the per-stroke label for grouped freehand annotations
         if (!suppressImage)
         {
-            sb.AppendLine($"> *(p. {page + 1}, freehand)*");
+            sb.AppendLine($"> {GetEnrichedLabel(page, freehand, "freehand")}");
             sb.AppendLine();
         }
     }
@@ -351,9 +370,27 @@ public class MarkdownBuilder
         return result;
     }
 
-    private static string BoldHighlightInContext(string blockText, string highlightText)
+    private static string GetEnrichedLabel(int page, Annotation annotation, string baseLabel)
     {
-        // Try exact match first
+        if (annotation.OverlappingBlocks.Count > 0)
+        {
+            var blockClass = annotation.OverlappingBlocks[0].Class;
+            var qualifier = blockClass switch
+            {
+                "equation" => $"highlighted {blockClass}",
+                "table" => $"highlighted {blockClass}",
+                "figure" => $"highlighted {blockClass}",
+                _ => null as string
+            };
+            if (qualifier != null)
+                return $"*(p. {page + 1}, {qualifier})*";
+        }
+        return $"*(p. {page + 1}, {baseLabel})*";
+    }
+
+    private string BoldHighlightInContext(string blockText, string highlightText, int page)
+    {
+        // Tier 1: exact match in block text
         var idx = blockText.IndexOf(highlightText, StringComparison.OrdinalIgnoreCase);
         if (idx >= 0)
         {
@@ -362,7 +399,7 @@ public class MarkdownBuilder
                 + blockText[(idx + highlightText.Length)..];
         }
 
-        // Fuzzy match: normalize whitespace and retry
+        // Tier 2: fuzzy match (normalized whitespace) in block text
         var (normBlock, blockMap) = NormalizeWithMap(blockText);
         var normHighlight = CleanText(highlightText);
 
@@ -375,6 +412,22 @@ public class MarkdownBuilder
             return blockText[..origStart]
                 + "**" + blockText[origStart..origEnd] + "**"
                 + blockText[origEnd..];
+        }
+
+        // Tier 3: try matching against full page context text
+        if (_pageContext != null && _pageContext.TryGetValue(page, out var pageText)
+            && !string.IsNullOrWhiteSpace(pageText))
+        {
+            var (normPage, pageMap) = NormalizeWithMap(pageText);
+            var pageMatchIdx = normPage.IndexOf(normHighlight, StringComparison.OrdinalIgnoreCase);
+            if (pageMatchIdx >= 0 && pageMatchIdx + normHighlight.Length < pageMap.Length)
+            {
+                var origStart = pageMap[pageMatchIdx];
+                var origEnd = pageMap[pageMatchIdx + normHighlight.Length];
+                return pageText[..origStart]
+                    + "**" + pageText[origStart..origEnd] + "**"
+                    + pageText[origEnd..];
+            }
         }
 
         // Last resort
