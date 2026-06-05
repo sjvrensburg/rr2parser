@@ -246,7 +246,7 @@ public class MarkdownBuilderTests
         Assert.Contains("## Summary", md);
         Assert.Contains("**2 annotations**", md);
         Assert.Contains("**1 pages**", md);
-        Assert.Contains("| Chapter 1 | 1 | 1 | 0 | 0 |", md);
+        Assert.Contains("| Chapter 1 | 1 | 1 | 0 | 0 | 0 |", md);
     }
 
     [Fact]
@@ -322,7 +322,7 @@ public class MarkdownBuilderTests
 
         var md = new MarkdownBuilder(export).Build();
 
-        Assert.Contains("*(p. 1, highlighted equation)*", md);
+        Assert.Contains("*(p. 1, highlight equation)*", md);
         Assert.DoesNotContain("*(p. 1, highlight)*", md);
     }
 
@@ -462,6 +462,224 @@ public class MarkdownBuilderTests
         var md = new MarkdownBuilder(export, extractedFigures: []).Build();
 
         Assert.DoesNotContain("## Extracted Figures", md);
+    }
+
+    [Fact]
+    public void Caret_Shows_Label()
+    {
+        var export = MakeExport(
+            outline: [new("Chapter 1", 0, [])],
+            pages: [new(0, 595, 842, [
+                new CaretAnnotation
+                {
+                    Type = "caret", Color = "#FF0", Opacity = 0.5,
+                    OverlappingBlocks = [], NearestHeading = Heading("Chapter 1", 0),
+                    X = 100, Y = 200, W = 10, H = 20
+                }
+            ])]);
+
+        var md = new MarkdownBuilder(export).Build();
+
+        Assert.Contains("*(p. 1, caret)*", md);
+    }
+
+    [Fact]
+    public void FreeText_Shows_Contents()
+    {
+        var export = MakeExport(
+            outline: [new("Chapter 1", 0, [])],
+            pages: [new(0, 595, 842, [
+                new FreeTextAnnotation
+                {
+                    Type = "free_text", Color = "#FF0", Opacity = 0.5,
+                    OverlappingBlocks = [], NearestHeading = Heading("Chapter 1", 0),
+                    X = 100, Y = 200, W = 200, H = 50,
+                    Contents = "A margin note written in the PDF"
+                }
+            ])]);
+
+        var md = new MarkdownBuilder(export).Build();
+
+        Assert.Contains("**Free text:** A margin note written in the PDF", md);
+        Assert.Contains("*(p. 1, free text)*", md);
+    }
+
+    [Fact]
+    public void FreeText_Without_Contents_Shows_Label_Only()
+    {
+        var export = MakeExport(
+            outline: [new("Chapter 1", 0, [])],
+            pages: [new(0, 595, 842, [
+                new FreeTextAnnotation
+                {
+                    Type = "free_text", Color = "#FF0", Opacity = 0.5,
+                    OverlappingBlocks = [], NearestHeading = Heading("Chapter 1", 0),
+                    X = 100, Y = 200, W = 200, H = 50,
+                    Contents = null
+                }
+            ])]);
+
+        var md = new MarkdownBuilder(export).Build();
+
+        Assert.DoesNotContain("Free text:", md);
+        Assert.Contains("*(p. 1, free text)*", md);
+    }
+
+    [Fact]
+    public void Unknown_Annotation_Is_Silently_Skipped()
+    {
+        var export = MakeExport(
+            outline: [new("Chapter 1", 0, [])],
+            pages: [new(0, 595, 842, [
+                new UnknownAnnotation
+                {
+                    Type = "unknown", Color = "#FF0", Opacity = 0.5,
+                    OverlappingBlocks = [], NearestHeading = Heading("Chapter 1", 0)
+                },
+                new HighlightAnnotation
+                {
+                    Type = "highlight", Color = "#FF0", Opacity = 0.5,
+                    OverlappingBlocks = [], NearestHeading = Heading("Chapter 1", 0),
+                    Rects = [new(50, 50, 100, 10)], Text = "visible"
+                }
+            ])]);
+
+        var md = new MarkdownBuilder(export).Build();
+
+        Assert.Contains("**visible**", md);
+        Assert.DoesNotContain("unknown", md);
+    }
+
+    [Fact]
+    public void Summary_Table_Includes_Other_Column()
+    {
+        var export = MakeExport(
+            outline: [new("Chapter 1", 0, [])],
+            pages: [new(0, 595, 842, [
+                new HighlightAnnotation
+                {
+                    Type = "highlight", Color = "#FF0", Opacity = 0.5,
+                    OverlappingBlocks = [], NearestHeading = Heading("Chapter 1", 0),
+                    Rects = [new(50, 50, 100, 10)], Text = "test"
+                },
+                new CaretAnnotation
+                {
+                    Type = "caret", Color = "#FF0", Opacity = 0.5,
+                    OverlappingBlocks = [], NearestHeading = Heading("Chapter 1", 0),
+                    X = 100, Y = 200, W = 10, H = 20
+                },
+                new FreeTextAnnotation
+                {
+                    Type = "free_text", Color = "#FF0", Opacity = 0.5,
+                    OverlappingBlocks = [], NearestHeading = Heading("Chapter 1", 0),
+                    X = 100, Y = 200, W = 200, H = 50,
+                    Contents = "note"
+                }
+            ])]);
+
+        var md = new MarkdownBuilder(export).Build();
+
+        // 1 highlight, 2 other (caret + free_text)
+        Assert.Contains("| Chapter 1 | 1 | 0 | 0 | 0 | 2 |", md);
+    }
+
+    [Fact]
+    public void Unknown_Annotation_Does_Not_Poison_Dedup()
+    {
+        // UnknownAnnotation with overlapping blocks should NOT suppress the
+        // next real annotation's context via the block-text dedup mechanism.
+        var sharedBlock = new LayoutBlock("text", 22, new(50, 50, 400, 100), 0.9, 0,
+            "Paragraph text that should remain visible.");
+
+        var export = MakeExport(
+            outline: [new("Section", 0, [])],
+            pages: [new(0, 595, 842, [
+                new UnknownAnnotation
+                {
+                    Type = "unknown", Color = "#FF0", Opacity = 0.5,
+                    OverlappingBlocks = [sharedBlock],
+                    NearestHeading = Heading("Section", 0)
+                },
+                new HighlightAnnotation
+                {
+                    Type = "highlight", Color = "#FF0", Opacity = 0.5,
+                    OverlappingBlocks = [sharedBlock],
+                    NearestHeading = Heading("Section", 0),
+                    Rects = [new(50, 50, 100, 10)],
+                    Text = "Paragraph text"
+                }
+            ])]);
+
+        var md = new MarkdownBuilder(export).Build();
+
+        // The highlight should still show its context (bolded in context)
+        Assert.Contains("**Paragraph text**", md);
+        Assert.Contains("should remain visible", md);
+    }
+
+    [Fact]
+    public void Underline_Labeled_As_Underline()
+    {
+        var export = MakeExport(
+            outline: [new("Chapter 1", 0, [])],
+            pages: [new(0, 595, 842, [
+                new HighlightAnnotation
+                {
+                    Type = "underline", Color = "#00F", Opacity = 0.5,
+                    OverlappingBlocks = [], NearestHeading = Heading("Chapter 1", 0),
+                    Rects = [new(50, 50, 100, 10)], Text = "underlined"
+                }
+            ])]);
+
+        var md = new MarkdownBuilder(export).Build();
+
+        Assert.Contains("*(p. 1, underline)*", md);
+        Assert.DoesNotContain("*(p. 1, highlight)*", md);
+    }
+
+    [Fact]
+    public void Annotation_Matches_Outline_Entry_With_Null_Page()
+    {
+        // Outline entry has null page, annotation's NearestHeading has page 5.
+        // The annotation should still be grouped under the outline heading.
+        var export = MakeExport(
+            outline: [new("Chapter 1", null, [])],
+            pages: [new(5, 595, 842, [
+                new HighlightAnnotation
+                {
+                    Type = "highlight", Color = "#FF0", Opacity = 0.5,
+                    OverlappingBlocks = [], NearestHeading = Heading("Chapter 1", 5),
+                    Rects = [new(50, 50, 100, 10)], Text = "found it"
+                }
+            ])]);
+
+        var md = new MarkdownBuilder(export).Build();
+
+        Assert.Contains("## Chapter 1", md);
+        Assert.Contains("**found it**", md);
+        Assert.DoesNotContain("## Other Annotations", md);
+    }
+
+    [Fact]
+    public void NearestHeading_With_Null_Page_Matches_Null_Page_Outline()
+    {
+        // Both sides have null page — should match by title.
+        var export = MakeExport(
+            outline: [new("Appendix", null, [])],
+            pages: [new(0, 595, 842, [
+                new TextNoteAnnotation
+                {
+                    Type = "text_note", Color = "#FFCC00", Opacity = 0.9,
+                    OverlappingBlocks = [],
+                    NearestHeading = new("Appendix", "outline", null),
+                    X = 100, Y = 100, NoteText = "Check this"
+                }
+            ])]);
+
+        var md = new MarkdownBuilder(export).Build();
+
+        Assert.Contains("## Appendix", md);
+        Assert.Contains("Check this", md);
     }
 
     private static int CountOccurrences(string text, string search)

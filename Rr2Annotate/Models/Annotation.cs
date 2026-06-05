@@ -50,6 +50,40 @@ public record FreehandAnnotation : Annotation
     public override double SortY => Points.Count > 0 ? Points.Min(p => p.Y) : 0;
 }
 
+/// <summary>
+/// Caret annotation (read-only PDF annotation, positioned by x/y/w/h).
+/// </summary>
+public record CaretAnnotation : Annotation
+{
+    public required double X { get; init; }
+    public required double Y { get; init; }
+    public required double W { get; init; }
+    public required double H { get; init; }
+    public override double SortY => Y;
+}
+
+/// <summary>
+/// Free-text annotation — visible text lives in the <c>contents</c> metadata field.
+/// </summary>
+public record FreeTextAnnotation : Annotation
+{
+    public required double X { get; init; }
+    public required double Y { get; init; }
+    public required double W { get; init; }
+    public required double H { get; init; }
+    /// <summary>FreeText content (from the <c>contents</c> JSON field).</summary>
+    public required string? Contents { get; init; }
+    public override double SortY => Y;
+}
+
+/// <summary>
+/// Fallback for annotation types not yet modelled explicitly.
+/// </summary>
+public record UnknownAnnotation : Annotation
+{
+    public override double SortY => 0;
+}
+
 public class AnnotationConverter : JsonConverter<Annotation>
 {
     public override Annotation Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
@@ -68,7 +102,7 @@ public class AnnotationConverter : JsonConverter<Annotation>
 
         return type switch
         {
-            "highlight" => new HighlightAnnotation
+            "highlight" or "underline" or "strikeout" or "squiggly" => new HighlightAnnotation
             {
                 Type = type, Color = color, Opacity = opacity,
                 OverlappingBlocks = blocks, NearestHeading = heading,
@@ -104,7 +138,30 @@ public class AnnotationConverter : JsonConverter<Annotation>
                     root.GetProperty("points").GetRawText(), options) ?? [],
                 StrokeWidth = root.TryGetProperty("stroke_width", out var fsw) ? fsw.GetDouble() : 0
             },
-            _ => throw new JsonException($"Unknown annotation type: {type}")
+            "caret" => new CaretAnnotation
+            {
+                Type = type, Color = color, Opacity = opacity,
+                OverlappingBlocks = blocks, NearestHeading = heading,
+                X = root.GetProperty("x").GetDouble(),
+                Y = root.GetProperty("y").GetDouble(),
+                W = root.GetProperty("w").GetDouble(),
+                H = root.GetProperty("h").GetDouble()
+            },
+            "free_text" => new FreeTextAnnotation
+            {
+                Type = type, Color = color, Opacity = opacity,
+                OverlappingBlocks = blocks, NearestHeading = heading,
+                X = root.GetProperty("x").GetDouble(),
+                Y = root.GetProperty("y").GetDouble(),
+                W = root.GetProperty("w").GetDouble(),
+                H = root.GetProperty("h").GetDouble(),
+                Contents = root.TryGetProperty("contents", out var c) ? c.GetString() : null
+            },
+            _ => new UnknownAnnotation
+            {
+                Type = type, Color = color, Opacity = opacity,
+                OverlappingBlocks = blocks, NearestHeading = heading
+            }
         };
     }
 
