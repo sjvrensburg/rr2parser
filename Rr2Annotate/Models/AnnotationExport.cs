@@ -13,7 +13,7 @@ public record AnnotationExport(
 
 public record OutlineEntry(
     [property: JsonPropertyName("title")] string Title,
-    [property: JsonPropertyName("page")] int Page,
+    [property: JsonPropertyName("page")] int? Page,
     [property: JsonPropertyName("children")] List<OutlineEntry> Children
 );
 
@@ -32,7 +32,7 @@ public record AnnotatedPage(
 public record NearestHeading(
     [property: JsonPropertyName("title")] string Title,
     [property: JsonPropertyName("source")] string Source,
-    [property: JsonPropertyName("page")] int Page
+    [property: JsonPropertyName("page")] int? Page
 );
 
 public record BoundingBox(

@@ -120,6 +120,222 @@ public class AnnotationConverterTests
     }
 
     [Fact]
+    public void Deserializes_Underline_As_HighlightAnnotation()
+    {
+        var json = """
+        {
+            "type": "underline",
+            "color": "#0000FF",
+            "opacity": 0.5,
+            "rects": [{"x": 50, "y": 100, "w": 200, "h": 8}],
+            "text": "underlined text",
+            "overlapping_blocks": [],
+            "nearest_heading": null
+        }
+        """;
+
+        var annotation = JsonSerializer.Deserialize<Annotation>(json, Options);
+
+        var highlight = Assert.IsType<HighlightAnnotation>(annotation);
+        Assert.Equal("underline", highlight.Type);
+        Assert.Equal("underlined text", highlight.Text);
+        Assert.Single(highlight.Rects);
+        Assert.Equal(50, highlight.Rects[0].X);
+    }
+
+    [Fact]
+    public void Deserializes_Strikeout_As_HighlightAnnotation()
+    {
+        var json = """
+        {
+            "type": "strikeout",
+            "color": "#FF0000",
+            "opacity": 0.5,
+            "rects": [{"x": 50, "y": 100, "w": 200, "h": 8}],
+            "text": "struck text",
+            "overlapping_blocks": [],
+            "nearest_heading": null
+        }
+        """;
+
+        var annotation = JsonSerializer.Deserialize<Annotation>(json, Options);
+
+        var highlight = Assert.IsType<HighlightAnnotation>(annotation);
+        Assert.Equal("strikeout", highlight.Type);
+        Assert.Equal("struck text", highlight.Text);
+    }
+
+    [Fact]
+    public void Deserializes_Squiggly_As_HighlightAnnotation()
+    {
+        var json = """
+        {
+            "type": "squiggly",
+            "color": "#00FF00",
+            "opacity": 0.5,
+            "rects": [{"x": 50, "y": 100, "w": 200, "h": 8}],
+            "text": "squiggly text",
+            "overlapping_blocks": [],
+            "nearest_heading": null
+        }
+        """;
+
+        var annotation = JsonSerializer.Deserialize<Annotation>(json, Options);
+
+        var highlight = Assert.IsType<HighlightAnnotation>(annotation);
+        Assert.Equal("squiggly", highlight.Type);
+        Assert.Equal("squiggly text", highlight.Text);
+    }
+
+    [Fact]
+    public void Deserializes_Caret()
+    {
+        var json = """
+        {
+            "type": "caret",
+            "color": "#FF0000",
+            "opacity": 0.8,
+            "x": 100.0,
+            "y": 200.0,
+            "w": 10.0,
+            "h": 20.0,
+            "overlapping_blocks": [],
+            "nearest_heading": null
+        }
+        """;
+
+        var annotation = JsonSerializer.Deserialize<Annotation>(json, Options);
+
+        var caret = Assert.IsType<CaretAnnotation>(annotation);
+        Assert.Equal("caret", caret.Type);
+        Assert.Equal(100.0, caret.X);
+        Assert.Equal(200.0, caret.Y);
+        Assert.Equal(10.0, caret.W);
+        Assert.Equal(20.0, caret.H);
+        Assert.Equal(200.0, caret.SortY);
+    }
+
+    [Fact]
+    public void Deserializes_FreeText()
+    {
+        var json = """
+        {
+            "type": "free_text",
+            "color": "#000000",
+            "opacity": 1.0,
+            "x": 50.0,
+            "y": 300.0,
+            "w": 200.0,
+            "h": 50.0,
+            "contents": "A margin note",
+            "overlapping_blocks": [],
+            "nearest_heading": null
+        }
+        """;
+
+        var annotation = JsonSerializer.Deserialize<Annotation>(json, Options);
+
+        var freeText = Assert.IsType<FreeTextAnnotation>(annotation);
+        Assert.Equal("free_text", freeText.Type);
+        Assert.Equal(50.0, freeText.X);
+        Assert.Equal("A margin note", freeText.Contents);
+        Assert.Equal(300.0, freeText.SortY);
+    }
+
+    [Fact]
+    public void Deserializes_Unknown_As_UnknownAnnotation()
+    {
+        var json = """
+        {
+            "type": "unknown",
+            "color": "#000000",
+            "opacity": 0.5,
+            "overlapping_blocks": [],
+            "nearest_heading": null
+        }
+        """;
+
+        var annotation = JsonSerializer.Deserialize<Annotation>(json, Options);
+
+        var unknown = Assert.IsType<UnknownAnnotation>(annotation);
+        Assert.Equal("unknown", unknown.Type);
+        Assert.Equal("#000000", unknown.Color);
+    }
+
+    [Fact]
+    public void Deserializes_New_Metadata_Fields_Without_Error()
+    {
+        var json = """
+        {
+            "type": "highlight",
+            "color": "#FFB6C1",
+            "opacity": 0.35,
+            "rects": [{"x": 100, "y": 200, "w": 50, "h": 10}],
+            "text": "some text",
+            "overlapping_blocks": [],
+            "nearest_heading": null,
+            "author": "Reviewer",
+            "contents": "Check this",
+            "subject": "Review",
+            "native_id": "annot-42",
+            "created_utc": "2026-06-01T12:00:00Z",
+            "modified_utc": "2026-06-02T08:30:00Z",
+            "state": "Accepted",
+            "source": "pdf",
+            "in_reply_to": "annot-41"
+        }
+        """;
+
+        var annotation = JsonSerializer.Deserialize<Annotation>(json, Options);
+
+        var highlight = Assert.IsType<HighlightAnnotation>(annotation);
+        Assert.Equal("some text", highlight.Text);
+    }
+
+    [Fact]
+    public void Deserializes_Outline_With_Null_Page()
+    {
+        var json = """
+        {
+            "source": "test.pdf",
+            "exported_at": "2026-01-01T00:00:00Z",
+            "page_count": 5,
+            "outline": [
+                {"title": "TOC Entry", "children": []}
+            ],
+            "pages": [],
+            "bookmarks": []
+        }
+        """;
+
+        var export = JsonSerializer.Deserialize<AnnotationExport>(json, Options)!;
+
+        Assert.Null(export.Outline[0].Page);
+    }
+
+    [Fact]
+    public void Deserializes_NearestHeading_With_Null_Page()
+    {
+        var json = """
+        {
+            "type": "highlight",
+            "color": "#FF0",
+            "opacity": 0.5,
+            "rects": [],
+            "overlapping_blocks": [],
+            "nearest_heading": {"title": "Appendix", "source": "outline"}
+        }
+        """;
+
+        var annotation = JsonSerializer.Deserialize<Annotation>(json, Options);
+
+        var highlight = Assert.IsType<HighlightAnnotation>(annotation);
+        Assert.NotNull(highlight.NearestHeading);
+        Assert.Equal("Appendix", highlight.NearestHeading.Title);
+        Assert.Null(highlight.NearestHeading.Page);
+    }
+
+    [Fact]
     public void Deserializes_Full_Export()
     {
         var json = """

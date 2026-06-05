@@ -35,6 +35,11 @@ public class MarkdownBuilder
         var headingOrder = new List<(string key, string title, int depth)>();
         BuildHeadingIndex(_export.Outline, 0, headingOrder);
 
+        // Precompute valid heading keys for matching
+        var validKeys = new HashSet<string>();
+        foreach (var (key, _, _) in headingOrder)
+            validKeys.Add(key);
+
         // Collect all annotations keyed by heading
         var grouped = new Dictionary<string, List<(int page, int annotIdx, Annotation annotation)>>();
 
@@ -43,9 +48,20 @@ public class MarkdownBuilder
             for (int i = 0; i < page.Annotations.Count; i++)
             {
                 var annot = page.Annotations[i];
-                var headingKey = annot.NearestHeading != null
-                    ? HeadingKey(annot.NearestHeading.Title, annot.NearestHeading.Page)
-                    : "__no_heading__";
+                string headingKey;
+                if (annot.NearestHeading == null)
+                {
+                    headingKey = "__no_heading__";
+                }
+                else
+                {
+                    // Try exact title+page match first, then fall back to title-only
+                    // (matches outline entries with a null page number)
+                    var exactKey = HeadingKey(annot.NearestHeading.Title, annot.NearestHeading.Page);
+                    headingKey = validKeys.Contains(exactKey)
+                        ? exactKey
+                        : HeadingKey(annot.NearestHeading.Title, (int?)null);
+                }
 
                 if (!grouped.ContainsKey(headingKey))
                     grouped[headingKey] = [];
@@ -117,8 +133,8 @@ public class MarkdownBuilder
         sb.AppendLine($"**{totalAnnotations} annotations** across **{totalPages} pages**");
         sb.AppendLine();
 
-        sb.AppendLine("| Section | Highlights | Notes | Rectangles | Freehand |");
-        sb.AppendLine("|---------|-----------|-------|------------|----------|");
+        sb.AppendLine("| Section | Highlights | Notes | Rectangles | Freehand | Other |");
+        sb.AppendLine("|---------|-----------|-------|------------|----------|-------|");
 
         foreach (var (key, title, _) in headingOrder)
         {
@@ -129,14 +145,15 @@ public class MarkdownBuilder
             var notes = annotations.Count(a => a.annotation is TextNoteAnnotation);
             var rects = annotations.Count(a => a.annotation is RectAnnotation);
             var freehand = annotations.Count(a => a.annotation is FreehandAnnotation);
+            var other = annotations.Count(a => IsOtherType(a.annotation));
 
-            sb.AppendLine($"| {title} | {highlights} | {notes} | {rects} | {freehand} |");
+            sb.AppendLine($"| {title} | {highlights} | {notes} | {rects} | {freehand} | {other} |");
         }
 
         if (grouped.ContainsKey("__no_heading__"))
         {
             var ug = grouped["__no_heading__"];
-            sb.AppendLine($"| *(Other)* | {ug.Count(a => a.annotation is HighlightAnnotation)} | {ug.Count(a => a.annotation is TextNoteAnnotation)} | {ug.Count(a => a.annotation is RectAnnotation)} | {ug.Count(a => a.annotation is FreehandAnnotation)} |");
+            sb.AppendLine($"| *(Other)* | {ug.Count(a => a.annotation is HighlightAnnotation)} | {ug.Count(a => a.annotation is TextNoteAnnotation)} | {ug.Count(a => a.annotation is RectAnnotation)} | {ug.Count(a => a.annotation is FreehandAnnotation)} | {ug.Count(a => IsOtherType(a.annotation))} |");
         }
 
         sb.AppendLine();
@@ -156,6 +173,11 @@ public class MarkdownBuilder
 
         foreach (var (page, annotIdx, annotation) in annotations)
         {
+            // Unknown annotations produce no output — skip them entirely so they
+            // don't poison the block-text dedup state for the next real annotation.
+            if (annotation is UnknownAnnotation)
+                continue;
+
             var blockText = GetBlockText(annotation.OverlappingBlocks);
             var blockTextKey = string.IsNullOrWhiteSpace(blockText) ? null : blockText;
 
@@ -189,6 +211,15 @@ public class MarkdownBuilder
             case FreehandAnnotation freehand:
                 EmitFreehand(sb, page, annotIdx, freehand, suppressContext, suppressImage, blockText);
                 break;
+            case CaretAnnotation caret:
+                EmitCaret(sb, page, caret, suppressContext, blockText);
+                break;
+            case FreeTextAnnotation freeText:
+                EmitFreeText(sb, page, freeText, suppressContext, blockText);
+                break;
+            case UnknownAnnotation:
+                // Silently skip unrecognised annotation types
+                break;
         }
     }
 
@@ -212,18 +243,14 @@ public class MarkdownBuilder
         }
 
         sb.AppendLine($">");
-        sb.AppendLine($"> {GetEnrichedLabel(page, highlight, "highlight")}");
+        sb.AppendLine($"> {GetEnrichedLabel(page, highlight, highlight.Type)}");
         sb.AppendLine();
     }
 
     private void EmitTextNote(StringBuilder sb, int page, TextNoteAnnotation note,
         bool suppressContext, string? blockText)
     {
-        if (!suppressContext && !string.IsNullOrWhiteSpace(blockText))
-        {
-            sb.AppendLine($"> {blockText}");
-            sb.AppendLine(">");
-        }
+        EmitContextBlock(sb, suppressContext, blockText);
 
         sb.AppendLine($"> **Note:** {note.NoteText}");
         sb.AppendLine($">");
@@ -272,11 +299,7 @@ public class MarkdownBuilder
             sb.AppendLine();
         }
 
-        if (!suppressContext && !string.IsNullOrWhiteSpace(blockText))
-        {
-            sb.AppendLine($"> {blockText}");
-            sb.AppendLine($">");
-        }
+        EmitContextBlock(sb, suppressContext, blockText);
 
         if (!hasImage)
         {
@@ -292,6 +315,31 @@ public class MarkdownBuilder
         }
     }
 
+    private void EmitCaret(StringBuilder sb, int page, CaretAnnotation caret,
+        bool suppressContext, string? blockText)
+    {
+        EmitContextBlock(sb, suppressContext, blockText);
+
+        sb.AppendLine($"> {GetEnrichedLabel(page, caret, "caret")}");
+        sb.AppendLine();
+    }
+
+    private void EmitFreeText(StringBuilder sb, int page, FreeTextAnnotation freeText,
+        bool suppressContext, string? blockText)
+    {
+        EmitContextBlock(sb, suppressContext, blockText);
+
+        var content = CleanText(freeText.Contents ?? "");
+        if (!string.IsNullOrWhiteSpace(content))
+        {
+            sb.AppendLine($"> **Free text:** {content}");
+            sb.AppendLine(">");
+        }
+
+        sb.AppendLine($"> {GetEnrichedLabel(page, freeText, "free text")}");
+        sb.AppendLine();
+    }
+
     private bool TryGetImagePath(int page, int annotIdx, out string relativePath)
     {
         relativePath = "";
@@ -303,6 +351,24 @@ public class MarkdownBuilder
 
         relativePath = Path.Combine(_imageRelDir, Path.GetFileName(absPath));
         return true;
+    }
+
+    /// <summary>
+    /// Whether the annotation is counted in the summary table's "Other" column.
+    /// </summary>
+    private static bool IsOtherType(Annotation a) => a is CaretAnnotation or FreeTextAnnotation or UnknownAnnotation;
+
+    /// <summary>
+    /// Emits the overlapping-block context text as a blockquote, when not suppressed.
+    /// Shared by emit methods that show context above the annotation label.
+    /// </summary>
+    private static void EmitContextBlock(StringBuilder sb, bool suppressContext, string? blockText)
+    {
+        if (!suppressContext && !string.IsNullOrWhiteSpace(blockText))
+        {
+            sb.AppendLine($"> {blockText}");
+            sb.AppendLine(">");
+        }
     }
 
     private static string GetBlockText(List<LayoutBlock> blocks)
@@ -377,9 +443,9 @@ public class MarkdownBuilder
             var blockClass = annotation.OverlappingBlocks[0].Class;
             var qualifier = blockClass switch
             {
-                "equation" => $"highlighted {blockClass}",
-                "table" => $"highlighted {blockClass}",
-                "figure" => $"highlighted {blockClass}",
+                "equation" => $"{baseLabel} {blockClass}",
+                "table" => $"{baseLabel} {blockClass}",
+                "figure" => $"{baseLabel} {blockClass}",
                 _ => null as string
             };
             if (qualifier != null)
@@ -434,7 +500,7 @@ public class MarkdownBuilder
         return $"{blockText}\n>\n> **Highlighted:** {highlightText}";
     }
 
-    private static string HeadingKey(string title, int page) => $"{title}||{page}";
+    private static string HeadingKey(string title, int? page) => $"{title}||{page}";
 
     private static void BuildHeadingIndex(
         List<OutlineEntry> entries, int depth,
