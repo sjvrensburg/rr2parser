@@ -1,16 +1,12 @@
-using Rr2Annotate.Models;
+using RailReader.Core.Models;
+using RailReader.Core.Services;
+using RailReader.Export;
+using RailReader.Renderer.Skia;
 using Rr2Annotate.Services;
 
 if (args.Length == 0 || args.Contains("--help") || args.Contains("-h"))
 {
     PrintUsage();
-    return 0;
-}
-
-// Handle --configure
-if (args.Contains("--configure"))
-{
-    await Settings.EnsureConfigured(forceReconfigure: true);
     return 0;
 }
 
@@ -21,7 +17,6 @@ bool includeImages = false;
 string? pagesArg = null;
 string? colorArg = null;
 bool exportMode = false;
-bool contextMode = false;
 bool noVlm = false;
 string? vlmEndpoint = null;
 string? vlmModel = null;
@@ -45,9 +40,6 @@ for (int i = 0; i < args.Length; i++)
             break;
         case "--export":
             exportMode = true;
-            break;
-        case "--context":
-            contextMode = true;
             break;
         case "--no-vlm":
             noVlm = true;
@@ -81,10 +73,6 @@ if (!File.Exists(pdfPath))
     return 1;
 }
 
-// Pass page range directly to CLI (CLI validates natively)
-string? cliPageRange = pagesArg;
-
-// Stdout mode: -o - writes markdown to stdout (incompatible with --images)
 bool stdoutMode = outputPath == "-";
 if (stdoutMode && includeImages)
 {
@@ -92,7 +80,12 @@ if (stdoutMode && includeImages)
     return 1;
 }
 
-// Parse colour filter
+if (exportMode && (colorArg != null || includeImages))
+{
+    Console.Error.WriteLine("Error: --export cannot be combined with --color or --images.");
+    return 1;
+}
+
 HashSet<string>? colorFilter = null;
 if (colorArg != null)
 {
@@ -104,157 +97,136 @@ if (colorArg != null)
     }
 }
 
-// Ensure CLI is configured
-var settings = await Settings.EnsureConfigured();
-
-// Validate mode combinations
-if (exportMode && contextMode)
-{
-    Console.Error.WriteLine("Error: --export and --context cannot be used together.");
-    return 1;
-}
-
-if (exportMode && (colorArg != null || includeImages))
-{
-    Console.Error.WriteLine("Error: --export cannot be combined with --color or --images.");
-    return 1;
-}
-
-if (includeImages && contextMode)
-{
-    Console.Error.WriteLine("Error: --images with --context is not yet supported (use --images or --context separately).");
-    return 1;
-}
-
-// Default output path (skip for stdout mode)
 if (!stdoutMode)
     outputPath ??= exportMode
         ? Path.ChangeExtension(pdfPath, null) + "-export.md"
         : Path.ChangeExtension(pdfPath, null) + "-annotations.md";
 
-// Export passthrough: delegate entirely to RailReader2's export command
+// Initialise PDFium native library
+PdfiumResolver.Initialize();
+var factory = new SkiaPdfServiceFactory();
+
+// --- Export mode: delegate entirely to RailReader.Export pipeline ---
 if (exportMode)
 {
-    Console.Error.WriteLine($"Exporting via RailReader2: {Path.GetFileName(pdfPath)}");
-    var exportMarkdown = await CliRunner.ExportAsync(
-        settings.CliCommand, pdfPath, cliPageRange,
-        noVlm, vlmEndpoint, vlmModel, vlmApiKey);
+    Console.Error.WriteLine($"Exporting: {Path.GetFileName(pdfPath)}");
+
+    VlmEndpointConfig? vlmConfig = null;
+    if (!noVlm && vlmEndpoint != null && vlmModel != null)
+        vlmConfig = new VlmEndpointConfig(vlmEndpoint, vlmModel, vlmApiKey);
+
+    var exportOptions = new MarkdownExportOptions
+    {
+        EnableVlm = !noVlm,
+        IncludeAnnotations = true,
+        InsertPageBreaks = true,
+        PageRange = pagesArg,
+        VlmEndpoint = vlmConfig,
+    };
+
+    var exporter = new MarkdownExportService(factory);
 
     if (stdoutMode)
     {
-        Console.Write(exportMarkdown);
+        await exporter.ExportAsync(pdfPath, Console.Out, exportOptions,
+            new Progress<ExportProgress>(p => Console.Error.WriteLine($"  {p.Status}")));
     }
     else
     {
-        File.WriteAllText(outputPath!, exportMarkdown);
+        using var sw = new StringWriter();
+        await exporter.ExportAsync(pdfPath, sw, exportOptions,
+            new Progress<ExportProgress>(p => Console.Error.WriteLine($"  {p.Status}")));
+        File.WriteAllText(outputPath!, sw.ToString());
         Console.Error.WriteLine($"Written to: {outputPath}");
     }
     return 0;
 }
 
-// Warn if VLM flags provided without --export or --context
-if ((noVlm || vlmEndpoint != null || vlmModel != null || vlmApiKey != null) && !contextMode)
-{
-    Console.Error.WriteLine("Warning: VLM flags have no effect without --export or --context.");
-}
-
+// --- Annotations mode ---
 Console.Error.WriteLine($"Extracting annotations from: {Path.GetFileName(pdfPath)}");
 
-// Extract annotations (pass page range to CLI for faster extraction)
-var export = await CliRunner.ExtractAnnotationsAsync(settings.CliCommand, pdfPath, cliPageRange);
+var annotationFile = CompositeAnnotationStore.Default.Load(pdfPath);
 
-// Apply colour filter
-if (colorFilter != null)
-{
-    export = export with
-    {
-        Pages = export.Pages
-            .Select(p => p with
-            {
-                Annotations = p.Annotations
-                    .Where(a => colorFilter.Contains(NormalizeColor(a.Color)))
-                    .ToList()
-            })
-            .Where(p => p.Annotations.Count > 0)
-            .ToList()
-    };
-}
-
-var totalAnnotations = export.Pages.Sum(p => p.Annotations.Count);
-Console.Error.WriteLine($"Found {totalAnnotations} annotations across {export.Pages.Count} pages.");
-
-if (totalAnnotations == 0)
+if (annotationFile == null || !annotationFile.Pages.Any(p => p.Value.Count > 0))
 {
     Console.Error.WriteLine("No annotations found. Nothing to export.");
     return 0;
 }
 
-// Context mode: fetch full page text from RailReader2 export
-Dictionary<int, string>? pageContext = null;
-
-if (contextMode)
+// Apply page range filter (CLI pages are 1-based; AnnotationFile keys are 0-based)
+if (pagesArg != null)
 {
-    Console.Error.WriteLine("Fetching page context via RailReader2 export...");
+    int maxPage = annotationFile.Pages.Keys.Max() + 2;
+    var allowed = new HashSet<int>(ParsePageRange(pagesArg, maxPage).Select(p => p - 1));
+    annotationFile = FilterPages(annotationFile, (pageIdx, _) => allowed.Contains(pageIdx));
+}
 
-    var contextMarkdown = await CliRunner.ExportAsync(
-        settings.CliCommand, pdfPath, cliPageRange,
-        noVlm, vlmEndpoint, vlmModel, vlmApiKey,
-        noAnnotations: true);
+// Apply colour filter
+if (colorFilter != null)
+    annotationFile = FilterAnnotations(annotationFile, a => colorFilter.Contains(NormalizeColor(a.Color)));
 
-    // Split on page breaks (---) to get per-page context
-    var chunks = contextMarkdown.Split("\n---\n", StringSplitOptions.None);
-    pageContext = new Dictionary<int, string>();
+int totalAnnotations = annotationFile.Pages.Values.Sum(p => p.Count);
+Console.Error.WriteLine($"Found {totalAnnotations} annotations across {annotationFile.Pages.Count} pages.");
 
-    if (cliPageRange != null)
+if (totalAnnotations == 0)
+{
+    Console.Error.WriteLine("No annotations found after filtering. Nothing to export.");
+    return 0;
+}
+
+var pdf = factory.CreatePdfService(pdfPath);
+var textService = new PdfTextService();
+
+// Pre-extract per-page text and highlight text from PDF character boxes
+var pageTexts = new Dictionary<int, string>();
+var highlightTexts = new Dictionary<(int page, int annotIdx), string>();
+
+foreach (var (pageIdx, annotations) in annotationFile.Pages)
+{
+    var pageText = textService.ExtractPageText(pdf.PdfBytes, pageIdx);
+    if (!string.IsNullOrEmpty(pageText.Text))
+        pageTexts[pageIdx] = pageText.Text;
+
+    for (int i = 0; i < annotations.Count; i++)
     {
-        var requestedPages = ParsePageRange(cliPageRange, export.PageCount);
-        for (int i = 0; i < chunks.Length && i < requestedPages.Count; i++)
-            pageContext[requestedPages[i] - 1] = chunks[i].Trim(); // 1-based → 0-based
+        if (annotations[i] is HighlightAnnotation highlight && highlight.Rects.Count > 0)
+        {
+            var parts = highlight.Rects
+                .Select(r => pageText.ExtractTextInRect(r.X, r.Y, r.X + r.W, r.Y + r.H))
+                .Where(t => !string.IsNullOrEmpty(t))
+                .ToList();
+            if (parts.Count > 0)
+                highlightTexts[(pageIdx, i)] = string.Join(" ", parts);
+        }
     }
-    else
-    {
-        for (int i = 0; i < chunks.Length; i++)
-            pageContext[i] = chunks[i].Trim();
-    }
-
-    Console.Error.WriteLine($"Retrieved context for {pageContext.Count} pages.");
 }
 
 // Optionally render and crop screenshots
 Dictionary<(int page, int annotIdx), string>? images = null;
 string? imageRelDir = null;
-List<FigureReference>? extractedFigures = null;
 
 if (includeImages)
 {
     var imageDir = Path.ChangeExtension(outputPath, null) + "-images";
     imageRelDir = Path.GetFileName(imageDir);
     Console.Error.WriteLine("Rendering screenshots...");
-    images = await ScreenshotService.CropAnnotationsAsync(settings.CliCommand, pdfPath, export, imageDir);
+    images = await ScreenshotService.CropAnnotationsAsync(pdf, annotationFile, imageDir);
     Console.Error.WriteLine($"Cropped {images.Count} annotation images.");
-
-    // Extract figures via RailReader2 export
-    Console.Error.WriteLine("Extracting figures via RailReader2 export...");
-    var figureDir = Path.ChangeExtension(outputPath, null) + "-figures";
-    var figureRelDir = Path.GetFileName(figureDir);
-
-    var figureMarkdown = await CliRunner.ExportAsync(
-        settings.CliCommand, pdfPath, cliPageRange,
-        noVlm, vlmEndpoint, vlmModel, vlmApiKey,
-        figureDir: figureDir, noAnnotations: true);
-
-    extractedFigures = ExtractFigureReferences(figureMarkdown, figureRelDir);
-    Console.Error.WriteLine($"Extracted {extractedFigures.Count} figures to {figureDir}");
 }
 
-// Build markdown
-var builder = new MarkdownBuilder(export, images, imageRelDir, pageContext, extractedFigures);
+var builder = new MarkdownBuilder(
+    annotationFile,
+    Path.GetFileName(pdfPath),
+    pdf.Outline,
+    highlightTexts,
+    pageTexts,
+    images,
+    imageRelDir);
+
 var markdown = builder.Build();
 
 if (stdoutMode)
-{
     Console.Write(markdown);
-}
 else
 {
     File.WriteAllText(outputPath!, markdown);
@@ -262,6 +234,35 @@ else
 }
 
 return 0;
+
+// --- Helpers ---
+
+static AnnotationFile FilterPages(AnnotationFile src, Func<int, List<Annotation>, bool> pred)
+{
+    var dst = new AnnotationFile
+    {
+        Version = src.Version, SourcePdf = src.SourcePdf,
+        SourcePdfPath = src.SourcePdfPath, Bookmarks = src.Bookmarks,
+    };
+    foreach (var (k, v) in src.Pages)
+        if (pred(k, v)) dst.Pages[k] = v;
+    return dst;
+}
+
+static AnnotationFile FilterAnnotations(AnnotationFile src, Func<Annotation, bool> pred)
+{
+    var dst = new AnnotationFile
+    {
+        Version = src.Version, SourcePdf = src.SourcePdf,
+        SourcePdfPath = src.SourcePdfPath, Bookmarks = src.Bookmarks,
+    };
+    foreach (var (k, v) in src.Pages)
+    {
+        var filtered = v.Where(pred).ToList();
+        if (filtered.Count > 0) dst.Pages[k] = filtered;
+    }
+    return dst;
+}
 
 static HashSet<string>? ParseColorFilter(string input)
 {
@@ -277,11 +278,8 @@ static HashSet<string>? ParseColorFilter(string input)
 
 static string NormalizeColor(string color)
 {
-    // Strip # prefix, lowercase
     var c = color.TrimStart('#').ToLowerInvariant();
-    // Expand 3-char hex to 6-char: "f00" -> "ff0000"
-    if (c.Length == 3)
-        c = $"{c[0]}{c[0]}{c[1]}{c[1]}{c[2]}{c[2]}";
+    if (c.Length == 3) c = $"{c[0]}{c[0]}{c[1]}{c[1]}{c[2]}{c[2]}";
     return c;
 }
 
@@ -294,7 +292,8 @@ static List<int> ParsePageRange(string range, int maxPage)
         {
             var bounds = part.Split('-', 2);
             var start = int.Parse(bounds[0]);
-            var end = bounds.Length > 1 && !string.IsNullOrEmpty(bounds[1]) ? int.Parse(bounds[1]) : maxPage;
+            var end = bounds.Length > 1 && !string.IsNullOrEmpty(bounds[1])
+                ? int.Parse(bounds[1]) : maxPage;
             for (int p = start; p <= end; p++) pages.Add(p);
         }
         else
@@ -303,22 +302,6 @@ static List<int> ParsePageRange(string range, int maxPage)
         }
     }
     return pages;
-}
-
-static List<FigureReference> ExtractFigureReferences(string markdown, string figureRelDir)
-{
-    var figures = new List<FigureReference>();
-    var regex = new System.Text.RegularExpressions.Regex(@"!\[([^\]]*)\]\(([^)]+)\)");
-
-    foreach (System.Text.RegularExpressions.Match match in regex.Matches(markdown))
-    {
-        var description = match.Groups[1].Value;
-        var fileName = Path.GetFileName(match.Groups[2].Value);
-        var relativePath = Path.Combine(figureRelDir, fileName);
-        figures.Add(new FigureReference(description, relativePath, 0));
-    }
-
-    return figures;
 }
 
 static void PrintUsage()
@@ -333,13 +316,11 @@ static void PrintUsage()
           --pages <range>      Only include annotations from these pages (e.g. "1,3,5-10")
           --color <hex>        Filter by annotation colour (e.g. "#FF0000" or "ff0000,ffcc00")
           --images             Include cropped screenshots for rect/freehand annotations
-          --export             Delegate to RailReader2 export (full-page Markdown, no annotation processing)
-          --context            Enrich highlights with full page context from RailReader2 export
-          --no-vlm             Disable VLM transcription (with --export or --context)
-          --vlm-endpoint <url> Override VLM endpoint URL
-          --vlm-model <name>   Override VLM model name
-          --vlm-api-key <key>  Override VLM API key
-          --configure          Set or update the path to the RailReader2 CLI
+          --export             Export full document to Markdown (layout-aware, includes annotations)
+          --no-vlm             Disable VLM transcription (with --export)
+          --vlm-endpoint <url> Override VLM endpoint URL (with --export)
+          --vlm-model <name>   Override VLM model name (with --export)
+          --vlm-api-key <key>  Override VLM API key (with --export)
           -h, --help           Show this help
         """);
 }

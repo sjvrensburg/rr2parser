@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
@@ -8,8 +8,9 @@
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>rr2annotate</ToolCommandName>
     <PackageId>Rr2Annotate</PackageId>
-    <Version>0.5.1</Version>
-    <Description>Export RailReader2 PDF annotations as structured Markdown</Description>
+    <Version>0.6.0</Version>
+    <Description>Export RailReader2 PDF annotations as structured Markdown — standalone, no external CLI required</Description>
+    <AssemblyName>rr2annotate</AssemblyName>
   </PropertyGroup>
 
   <ItemGroup>
@@ -17,8 +18,9 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="SkiaSharp" Version="3.*" />
-    <PackageReference Include="SkiaSharp.NativeAssets.Linux" Version="3.*" />
+    <PackageReference Include="RailReader.Export" Version="0.28.0" />
+    <PackageReference Include="RailReader.Renderer.Skia" Version="0.28.0" />
+    <PackageReference Include="RailReader.Core.Analysis" Version="0.28.0" />
   </ItemGroup>
 
 </Project>
