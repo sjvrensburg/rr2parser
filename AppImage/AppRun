@@ -1,0 +1,17 @@
+#!/bin/bash
+# AppRun — entry point for the rr2annotate AppImage.
+# Sets up the environment so the self-contained .NET binary finds its native
+# libraries (libSkiaSharp.so, libpdfium.so, libonnxruntime*.so) and, optionally,
+# the bundled ONNX layout model.
+
+HERE="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
+
+# Prepend our native library directory so the dynamic linker picks them up
+# before any system-installed versions.
+export LD_LIBRARY_PATH="${HERE}/usr/bin:${LD_LIBRARY_PATH}"
+
+# LayoutModelLocator probes $APPDIR/models/ — export APPDIR so it finds the
+# bundled model (if present).
+export APPDIR="${HERE}"
+
+exec "${HERE}/usr/bin/rr2annotate" "$@"
