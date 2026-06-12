@@ -113,9 +113,12 @@ public static class ScreenshotService
 
         for (int i = 0; i < indices.Count; i++)
             for (int j = i + 1; j < indices.Count; j++)
-                if (bounds[i].HasValue && bounds[j].HasValue &&
-                    Find(i) != Find(j) && BBoxDistance(bounds[i].Value, bounds[j].Value) <= MergeDistancePt)
+            {
+                var bi = bounds[i]; var bj = bounds[j];
+                if (bi.HasValue && bj.HasValue &&
+                    Find(i) != Find(j) && BBoxDistance(bi.Value, bj.Value) <= MergeDistancePt)
                     Union(i, j);
+            }
 
         var groupMap = new Dictionary<int, List<int>>();
         for (int i = 0; i < indices.Count; i++)
